@@ -5,9 +5,9 @@ name: Sync to CNB and Create Release
 
 on:
   push:
-    branches: [main]             # 监听 main 分支的 push
-    tags: ['release-v*']         # 监听 release-v* 标签的 push
-  workflow_dispatch:             # 允许手动触发
+    branches: [main]
+    tags: ['release-v*']
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -17,7 +17,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # 注意：这里替换为你的 CNB 仓库实际地址
+  # 替换为你的 CNB 仓库实际地址
   CNB_REPO: cnb.cool/1983shake/sync-repo.git
 
 jobs:
