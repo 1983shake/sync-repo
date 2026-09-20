@@ -1,30 +1,28 @@
 # ============================================================================
-# CNB 流水线配置（修正版）
-#   默认分支: master
-#   触发事件: commit.add（分支推送包含新提交时）
+# CNB 流水线配置（统一使用 main 分支）
 # ============================================================================
 
-# ---------------------------- master 分支同步 ----------------------------
-"master":
-  commit.add:                    # 使用 commit.add 替代 push
+# ---------------------------- main 分支同步 ----------------------------
+"main":
+  push:                          # 使用 push 事件，也可换成 commit.add
     - imports:
+        # 引用密钥仓库中的 envs.yml，自动注入 GITHUB_TOKEN 和 GITHUB_REPO
         # - https://cnb.cool/1983shake/cnb-secrets/-/blob/main/envs.yml
         - https://cnb.cool/1983shake/secret-repo/-/blob/main/sync-repo-env.yml
       stages:
-        - name: push master to github
+        - name: push main to github
           script: |
             set -e
             echo "==> 当前分支: ${CNB_BRANCH}"
-            echo "==> 新增提交数: ${CNB_NEW_COMMITS_COUNT}"
-            echo "==> 同步 master 到 GitHub"
+            echo "==> 同步 main 到 GitHub"
             git remote remove github 2>/dev/null || true
             git remote add github \
               "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPO}.git"
-            git push github "HEAD:master" --force
-            echo "==> master 同步完成"
+            # 关键修改：推送到 GitHub 的 main 分支
+            git push github "HEAD:main" --force
+            echo "==> main 同步完成"
 
 # ------------------------ release-v* tag 流水线 ------------------------
-# tag 推送不受分支默认名影响，保持原有配置即可
 "release-v*":
   tag_push:
     - services:
@@ -33,6 +31,7 @@
         # - https://cnb.cool/1983shake/cnb-secrets/-/blob/main/envs.yml
         - https://cnb.cool/1983shake/secret-repo/-/blob/main/sync-repo-env.yml
       stages:
+        # 步骤 1：提取版本号并生成 Release 配置
         - name: prepare release
           script: |
             set -e
@@ -44,28 +43,37 @@
               "description": "Release Vael-Mux V${VERSION}"
             }
             EOF
+            echo "生成的 Release 配置："
+            cat release-options.json
 
+        # 步骤 2：在 CNB 创建 Release
         - name: create release on cnb
           type: git:release
           optionsFrom: ./release-options.json
 
+        # 步骤 3：同步 tag 到 GitHub
         - name: sync tag to github
           script: |
             set -e
+            echo "==> 同步 tag ${CNB_BRANCH} 到 GitHub"
             git remote remove github 2>/dev/null || true
             git remote add github \
               "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPO}.git"
             git push github \
               "refs/tags/${CNB_BRANCH}:refs/tags/${CNB_BRANCH}" --force
+            echo "==> tag 同步完成"
 
+        # 步骤 4：构建并推送 Docker 镜像
         - name: docker build and push
           script: |
             set -e
             IMAGE_BASE="${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}"
             VERSION="${CNB_BRANCH#release-v}"
+            echo "==> 构建版本: ${VERSION}"
             docker build \
               -t "${IMAGE_BASE}:${VERSION}" \
               -t "${IMAGE_BASE}:latest" \
               .
             docker push "${IMAGE_BASE}:${VERSION}"
             docker push "${IMAGE_BASE}:latest"
+            echo "==> 镜像推送完成: ${IMAGE_BASE}:${VERSION}"

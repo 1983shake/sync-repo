@@ -1,20 +1,13 @@
 # ============================================================================
-# GitHub Actions：同步 GitHub → CNB
-#   功能：
-#     1. main 分支 push -> 推送 main 到 CNB
-#     2. release-v* tag  -> 推送 tag 到 CNB（触发 CNB 建 Release + 构建 Docker 镜像）
-#                        并在 GitHub 端建立对应的 Release
-#
-#   前置要求（GitHub → Settings → Secrets and variables → Actions）：
-#     GIT_PASSWORD：CNB 访问令牌（具备仓库写权限）
+# GitHub Actions：同步 GitHub -> CNB
 # ============================================================================
 name: Sync to CNB and Create Release
 
 on:
   push:
-    branches: [main]
-    tags: ['release-v*']
-  workflow_dispatch:
+    branches: [main]             # 监听 main 分支的 push
+    tags: ['release-v*']         # 监听 release-v* 标签的 push
+  workflow_dispatch:             # 允许手动触发
 
 permissions:
   contents: write
@@ -24,7 +17,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CNB_REPO: cnb.cool/1983shake/Vael-Mux.git
+  # 注意：这里替换为你的 CNB 仓库实际地址
+  CNB_REPO: cnb.cool/1983shake/sync-repo.git
 
 jobs:
   sync:
