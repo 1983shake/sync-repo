@@ -21,6 +21,10 @@
         # - https://cnb.cool/1983shake/cnb-secrets/-/blob/main/envs.yml
         - https://cnb.cool/1983shake/secret-repo/-/blob/main/sync-repo-env.yml
       stages:
+        - name: check secrets
+          script: |
+            echo "TOKEN_LEN=${#GITHUB_TOKEN}"
+            echo "REPO=${GITHUB_REPO}"
         - name: push main to github
           script: |
             set -e
