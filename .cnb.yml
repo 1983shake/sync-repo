@@ -5,8 +5,8 @@
 #     2. release-v* tag -> 建 CNB Release + 同步 tag 到 GitHub + 构建 Docker 镜像
 # ============================================================================
 
-# "main":
-"master":
+"main":
+# "master":
   # 双事件保险：同时配置 push 和 commit.add，避免因事件类型不匹配导致不触发
   push:
     - imports:
