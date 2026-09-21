@@ -110,12 +110,15 @@ x-vars:
 # ============================================================================
 # release-v* 标签流水线
 #   功能：
-#     1. 规范化 CNB Release 标题为 "<项目名>_V<版本号>"，保留网页描述
+#     1. 使用 git:release 内置任务规范化 Release 标题为 "<项目名>_V<版本号>"
+#        同时通过 descriptionFromFile 读取网页填写的描述，避免覆盖
 #     2. 同步 tag 到 GitHub
 #     3. 构建并推送 Docker 镜像
 #
-#   ⚠️ 关键：嵌入 script 的 Python 代码每一行必须与 YAML 块内容基线
-#     同缩进（12 个空格），否则会破坏 YAML 块标量。
+#   说明：
+#     - git:release 是 CNB 内置任务，通过 options 指定 title/description
+#     - 不再依赖 python/jq 解析 API，避免环境无工具的问题
+#     - 网页填写的描述通过 API 读取后写入临时文件，再传给 descriptionFromFile
 # ============================================================================
 "release-v*":
   tag_push:
@@ -124,133 +127,81 @@ x-vars:
       imports:
         - *secret_repo_url
       stages:
-        - name: normalize release title (keep body)
+        # -----------------------------------------------------------------
+        # 步骤 1：读取网页填写的 Release 描述，保存到临时文件
+        #   仅使用 curl（CNB 环境通常自带），避免依赖 python/jq
+        # -----------------------------------------------------------------
+        - name: fetch release description
           script: |
             set -e
 
             TAG_NAME="${CNB_TAG:-$CNB_BRANCH}"
+            echo "==> 正在获取 Release 描述，tag: ${TAG_NAME}"
+
+            # 尝试多种 API 路径
+            API_PATHS=""
+            API_PATHS="${API_PATHS} ${CNB_API_ENDPOINT}/${CNB_REPO_SLUG}/-/releases"
+            API_PATHS="${API_PATHS} ${CNB_API_ENDPOINT}/repos/${CNB_REPO_SLUG}/releases"
+
+            DESC=""
+            HTTP_OK=0
+
+            for url in ${API_PATHS}; do
+              echo "==> 尝试: ${url}"
+              CODE="$(curl -s -o /tmp/releases.json -w '%{http_code}' \
+                -H "Authorization: Bearer ${CNB_TOKEN}" \
+                -H "accept: application/json" \
+                "${url}" 2>/dev/null || echo 000)"
+              echo "    HTTP ${CODE}"
+
+              if [ "${CODE}" = "200" ]; then
+                HTTP_OK=1
+                # 用 grep/sed 做简单文本提取（不依赖 json 工具）
+                # 查找 tag 匹配的 release 的 description 字段
+                if command -v grep >/dev/null 2>&1; then
+                  DESC="$(grep -o "\"tag_name\":\"${TAG_NAME}\"[^}]*\"description\":\"[^\"]*\"" \
+                    /tmp/releases.json 2>/dev/null | \
+                    sed 's/.*"description":"\([^"]*\)".*/\1/' | head -n 1 || true)"
+                fi
+                break
+              fi
+            done
+
+            if [ "${HTTP_OK}" != "1" ]; then
+              echo "⚠️ 未能获取 Releases API（所有路径均非 200），跳过标题规范化"
+              echo "   网页填写的描述将保持不变"
+              exit 0
+            fi
+
+            echo "==> 提取到的描述: [${DESC}]"
+
+            # 将描述写入文件，供 git:release 的 descriptionFromFile 使用
+            printf '%s' "${DESC}" > /tmp/release-desc.txt
+            echo "==> 描述已保存到 /tmp/release-desc.txt"
+
+            # 输出规范化标题，供后续步骤使用
             PROJECT_NAME="${GITHUB_REPO##*/}"
             if [ -z "$PROJECT_NAME" ]; then
               PROJECT_NAME="${CNB_REPO_NAME:-${CNB_REPO_SLUG##*/}}"
             fi
             VERSION="${TAG_NAME#release-v}"
-            NEW_TITLE="${PROJECT_NAME}_V${VERSION}"
+            echo "==> 目标标题: ${PROJECT_NAME}_V${VERSION}"
 
-            echo "TAG_NAME:   ${TAG_NAME}"
-            echo "项目名:     ${PROJECT_NAME}"
-            echo "版本号:     ${VERSION}"
-            echo "目标标题:   ${NEW_TITLE}"
+        # -----------------------------------------------------------------
+        # 步骤 2：用 git:release 内置任务创建/更新 Release
+        #   title 使用规范化的 "<项目名>_V<版本号>"
+        #   descriptionFromFile 使用上一步保存的描述，避免覆盖网页内容
+        # -----------------------------------------------------------------
+        - name: create/update release with normalized title
+          type: git:release
+          options:
+            tag: "${CNB_TAG:-$CNB_BRANCH}"
+            title: "${PROJECT_NAME}_V${VERSION}"
+            descriptionFromFile: /tmp/release-desc.txt
 
-            # ---------- 工具探测 ----------
-            HAVE_CURL=0
-            if command -v curl >/dev/null 2>&1; then HAVE_CURL=1; fi
-
-            PY=""
-            if command -v python3 >/dev/null 2>&1; then
-              PY=python3
-            elif command -v python >/dev/null 2>&1; then
-              PY=python
-            fi
-
-            JQ=""
-            if command -v jq >/dev/null 2>&1; then JQ=jq; fi
-
-            echo "==> 工具检测: curl=${HAVE_CURL} python=${PY:-无} jq=${JQ:-无}"
-
-            if [ "$HAVE_CURL" != "1" ]; then
-              echo "⚠️ 无 curl，跳过标题规范化"
-              exit 0
-            fi
-            if [ -z "$PY" ] && [ -z "$JQ" ]; then
-              echo "⚠️ 无 python 也无 jq，跳过标题规范化"
-              exit 0
-            fi
-
-            # ---------- 拉取 Release 列表 ----------
-            RELEASES_URL="${CNB_API_ENDPOINT}/${CNB_REPO_SLUG}/-/releases"
-            echo "==> 查询: ${RELEASES_URL}"
-
-            HTTP_CODE="$(curl -s -o /tmp/releases.json -w '%{http_code}' \
-              -H "Authorization: Bearer ${CNB_TOKEN}" \
-              -H "accept: application/json" \
-              "${RELEASES_URL}" 2>/dev/null || echo 000)"
-            echo "==> HTTP: ${HTTP_CODE}"
-
-            if [ "${HTTP_CODE}" != "200" ]; then
-              echo "⚠️ Releases API 非 200，跳过标题规范化"
-              exit 0
-            fi
-
-            # ---------- 生成 /tmp/patch.json ----------
-            rm -f /tmp/patch.json
-
-            if [ -n "$JQ" ]; then
-              echo "==> 使用 jq 解析"
-              RELEASE_DESC="$(${JQ} -r --arg tag "${TAG_NAME}" \
-            '(if type=="array" then . else (.releases // []) end) | map(select((.tag_name // .tag)==$tag)) | (.[0] // {}) | (.body // .description // .desc // .notes // "")' \
-            /tmp/releases.json 2>/dev/null || true)"
-              MATCH_N="$(${JQ} -r --arg tag "${TAG_NAME}" \
-            '(if type=="array" then . else (.releases // []) end) | map(select((.tag_name // .tag)==$tag)) | length' \
-            /tmp/releases.json 2>/dev/null || echo 0)"
-              if [ -n "${MATCH_N}" ] && [ "${MATCH_N}" != "0" ]; then
-                ${JQ} -n --arg t "${NEW_TITLE}" --arg b "${RELEASE_DESC}" \
-            '{title:$t, body:$b}' > /tmp/patch.json
-              fi
-            elif [ -n "$PY" ]; then
-              echo "==> 使用 ${PY} 解析"
-              TAG_NAME="${TAG_NAME}" NEW_TITLE="${NEW_TITLE}" "${PY}" -c '
-            import json, os, sys
-            tag = os.environ["TAG_NAME"]
-            title = os.environ["NEW_TITLE"]
-            try:
-                with open(sys.argv[1], encoding="utf-8") as f:
-                    data = json.load(f)
-            except Exception as e:
-                print("解析失败: %s" % e, file=sys.stderr)
-                sys.exit(0)
-            items = data if isinstance(data, list) else (data or {}).get("releases", [])
-            for r in items:
-                if r.get("tag_name") == tag or r.get("tag") == tag:
-                    desc = (r.get("body") or r.get("description")
-                            or r.get("desc") or r.get("notes") or "")
-                    with open("/tmp/patch.json", "w", encoding="utf-8") as f:
-                        json.dump({"title": title, "body": desc}, f, ensure_ascii=False)
-                    sys.exit(0)
-            ' /tmp/releases.json
-            fi
-
-            if [ ! -f /tmp/patch.json ]; then
-              echo "⚠️ 未匹配到 tag=${TAG_NAME} 的 Release，跳过标题规范化"
-              exit 0
-            fi
-
-            echo "==> PATCH body:"
-            cat /tmp/patch.json
-            echo
-
-            # ---------- 更新 Release 标题 ----------
-            # ⚠️ 端点/字段名因 CNB 版本而异，若 404/400 请按日志调整：
-            #    端点备用：
-            #      ${CNB_API_ENDPOINT}/repos/${CNB_REPO_SLUG}/releases/tags/${TAG_NAME}
-            #    字段备用：
-            #      title / name、body / description
-            UPDATE_URL="${CNB_API_ENDPOINT}/${CNB_REPO_SLUG}/-/releases/tags/${TAG_NAME}"
-            PATCH_CODE="$(curl -s -o /tmp/patch.resp -w '%{http_code}' \
-              -X PATCH \
-              -H "Authorization: Bearer ${CNB_TOKEN}" \
-              -H "Content-Type: application/json" \
-              -H "accept: application/json" \
-              --data-binary @/tmp/patch.json \
-              "${UPDATE_URL}" 2>/dev/null || echo 000)"
-            echo "==> PATCH HTTP: ${PATCH_CODE}"
-            head -c 500 /tmp/patch.resp 2>/dev/null; echo
-
-            if [ "${PATCH_CODE}" = "200" ] || [ "${PATCH_CODE}" = "201" ]; then
-              echo "✅ 标题已规范化为: ${NEW_TITLE}"
-            else
-              echo "⚠️ 更新失败（HTTP ${PATCH_CODE}），网页内容保持不变"
-            fi
-
+        # -----------------------------------------------------------------
+        # 步骤 3：同步 tag 到 GitHub
+        # -----------------------------------------------------------------
         - name: sync tag to github
           script: |
             set -e
@@ -273,6 +224,9 @@ x-vars:
             echo "❌ tag 推送失败"
             exit 1
 
+        # -----------------------------------------------------------------
+        # 步骤 4：构建并推送 Docker 镜像
+        # -----------------------------------------------------------------
         - name: docker build and push
           script: |
             set -e
