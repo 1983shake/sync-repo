@@ -128,8 +128,7 @@ x-vars:
         - *secret_repo_url
       stages:
         # -----------------------------------------------------------------
-        # 步骤 1：读取网页填写的 Release 描述，保存到临时文件
-        #   仅使用 curl（CNB 环境通常自带），避免依赖 python/jq
+        # 步骤 1：读取网页填写的 Release 描述，保存到共享目录
         # -----------------------------------------------------------------
         - name: fetch release description
           script: |
@@ -138,7 +137,6 @@ x-vars:
             TAG_NAME="${CNB_TAG:-$CNB_BRANCH}"
             echo "==> 正在获取 Release 描述，tag: ${TAG_NAME}"
 
-            # 尝试多种 API 路径
             API_PATHS=""
             API_PATHS="${API_PATHS} ${CNB_API_ENDPOINT}/${CNB_REPO_SLUG}/-/releases"
             API_PATHS="${API_PATHS} ${CNB_API_ENDPOINT}/repos/${CNB_REPO_SLUG}/releases"
@@ -156,8 +154,6 @@ x-vars:
 
               if [ "${CODE}" = "200" ]; then
                 HTTP_OK=1
-                # 用 grep/sed 做简单文本提取（不依赖 json 工具）
-                # 查找 tag 匹配的 release 的 description 字段
                 if command -v grep >/dev/null 2>&1; then
                   DESC="$(grep -o "\"tag_name\":\"${TAG_NAME}\"[^}]*\"description\":\"[^\"]*\"" \
                     /tmp/releases.json 2>/dev/null | \
@@ -168,18 +164,16 @@ x-vars:
             done
 
             if [ "${HTTP_OK}" != "1" ]; then
-              echo "⚠️ 未能获取 Releases API（所有路径均非 200），跳过标题规范化"
-              echo "   网页填写的描述将保持不变"
+              echo "⚠️ 未能获取 Releases API，跳过标题规范化，保留网页内容"
               exit 0
             fi
 
             echo "==> 提取到的描述: [${DESC}]"
 
-            # 将描述写入文件，供 git:release 的 descriptionFromFile 使用
-            printf '%s' "${DESC}" > /tmp/release-desc.txt
-            echo "==> 描述已保存到 /tmp/release-desc.txt"
+            # ⚠️ 关键修复：写入 CNB_BUILD_WORKSPACE 共享目录
+            printf '%s' "${DESC}" > "${CNB_BUILD_WORKSPACE}/release-desc.txt"
+            echo "==> 描述已保存到 ${CNB_BUILD_WORKSPACE}/release-desc.txt"
 
-            # 输出规范化标题，供后续步骤使用
             PROJECT_NAME="${GITHUB_REPO##*/}"
             if [ -z "$PROJECT_NAME" ]; then
               PROJECT_NAME="${CNB_REPO_NAME:-${CNB_REPO_SLUG##*/}}"
@@ -188,16 +182,15 @@ x-vars:
             echo "==> 目标标题: ${PROJECT_NAME}_V${VERSION}"
 
         # -----------------------------------------------------------------
-        # 步骤 2：用 git:release 内置任务创建/更新 Release
-        #   title 使用规范化的 "<项目名>_V<版本号>"
-        #   descriptionFromFile 使用上一步保存的描述，避免覆盖网页内容
+        # 步骤 2：用 git:release 创建/更新 Release
+        #   descriptionFromFile 指向共享目录中的文件
         # -----------------------------------------------------------------
         - name: create/update release with normalized title
           type: git:release
           options:
             tag: "${CNB_TAG:-$CNB_BRANCH}"
             name: "${PROJECT_NAME}_V${VERSION}"
-            descriptionFromFile: ./release-desc.txt
+            descriptionFromFile: "${CNB_BUILD_WORKSPACE}/release-desc.txt"
 
         # -----------------------------------------------------------------
         # 步骤 3：同步 tag 到 GitHub
