@@ -156,6 +156,10 @@ x-vars:
         - name: prepare release
           script: |
             set -e
+
+            # 优先取 CNB_TAG，兼容 CNB_BRANCH
+            TAG_NAME="${CNB_TAG:-$CNB_BRANCH}"
+
             # 从 GITHUB_REPO 中提取项目名
             # 例：1983shake/sync-repo -> sync-repo
             PROJECT_NAME="${GITHUB_REPO##*/}"
@@ -163,18 +167,23 @@ x-vars:
             if [ -z "$PROJECT_NAME" ]; then
               PROJECT_NAME="${CNB_REPO_NAME:-${CNB_REPO_SLUG##*/}}"
             fi
+
             # 从 tag 名中剥离前缀得到版本号
             # 例：release-v1.2.3 -> 1.2.3
-            VERSION="${CNB_BRANCH#release-v}"
+            VERSION="${TAG_NAME#release-v}"
+
+            echo "TAG_NAME: ${TAG_NAME}"
             echo "项目名: ${PROJECT_NAME}"
             echo "版本号: ${VERSION}"
 
             # 生成 Release 配置文件
-            # ⚠️ 可修改：标题和描述的模板可按需调整
+            # 注意：CNB 的 git:release 动作通常使用 body 字段作为发布说明，
+            #       若你的 CNB 版本仍要求 description，请将 body 改为 description。
             cat > release-options.json <<EOF
             {
+              "tag": "${TAG_NAME}",
               "title": "${PROJECT_NAME}_V${VERSION}",
-              "description": "Release ${PROJECT_NAME} V${VERSION}"
+              "body": "Release ${PROJECT_NAME} V${VERSION}"
             }
             EOF
             echo "生成的 Release 配置："
@@ -197,14 +206,17 @@ x-vars:
         - name: sync tag to github
           script: |
             set -e
-            echo "==> 同步 tag ${CNB_BRANCH} 到 GitHub"
+
+            TAG_NAME="${CNB_TAG:-$CNB_BRANCH}"
+
+            echo "==> 同步 tag ${TAG_NAME} 到 GitHub"
             git remote remove github 2>/dev/null || true
             git remote add github \
               "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPO}.git"
 
             for i in 1 2 3 4 5; do
               if git push github \
-                "refs/tags/${CNB_BRANCH}:refs/tags/${CNB_BRANCH}" --force; then
+                "refs/tags/${TAG_NAME}:refs/tags/${TAG_NAME}" --force; then
                 echo "✅ tag 推送成功"
                 exit 0
               fi
@@ -224,12 +236,14 @@ x-vars:
         - name: docker build and push
           script: |
             set -e
+
+            TAG_NAME="${CNB_TAG:-$CNB_BRANCH}"
             # IMAGE_BASE 由 CNB 内置变量拼接而成：
             #   CNB_DOCKER_REGISTRY     -> CNB 镜像仓库地址
             #   CNB_REPO_SLUG_LOWERCASE -> 仓库 slug（全小写）
             IMAGE_BASE="${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}"
             # 从 tag 名中剥离前缀得到版本号
-            VERSION="${CNB_BRANCH#release-v}"
+            VERSION="${TAG_NAME#release-v}"
             echo "==> 构建版本: ${VERSION}"
 
             # ⚠️ 可选：如需把版本号注入镜像，取消下面一行的注释
