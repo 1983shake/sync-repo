@@ -110,12 +110,14 @@ x-vars:
 # ============================================================================
 # release-v* 标签流水线
 #   功能：
-#     1. 规范化 CNB Release 标题为 "<项目名>_V<版本号>"，保留网页描述
+#     1. 规范化 CNB Release 标题为 "<项目名>_V<版本号>"
 #     2. 同步 tag 到 GitHub
 #     3. 构建并推送 Docker 镜像
 #
-#   项目名来源：
-#     直接取 GITHUB_REPO 的仓库名（不做兜底）
+#   核心策略：
+#     - 在同一 stage 内生成 release-options.json（含 tag/title/body）
+#       彻底避免跨 stage 变量不传递的问题
+#     - 用 optionsFrom 读取 JSON，让 git:release 使用正确的 title
 # ============================================================================
 "release-v*":
   tag_push:
@@ -125,78 +127,107 @@ x-vars:
         - *secret_repo_url
       stages:
         # -----------------------------------------------------------------
-        # 步骤 1：读取网页填写的描述，规范化标题，写入工作区
+        # 步骤 1：生成 release-options.json
+        #   包含 tag / title / body（网页填写的描述，若提取不到则为空）
         # -----------------------------------------------------------------
-        - name: fetch release description and prepare title
-          id: prepare
+        - name: prepare release options
           script: |
             set -e
 
             TAG_NAME="${CNB_TAG:-$CNB_BRANCH}"
-            echo "==> 正在获取 Release 描述，tag: ${TAG_NAME}"
-
-            # 项目名：直接取 GITHUB_REPO 的仓库名，不做兜底
-            # 例：1983shake/sync-repo -> sync-repo
             PROJECT_NAME="${GITHUB_REPO##*/}"
-
             VERSION="${TAG_NAME#release-v}"
             NEW_TITLE="${PROJECT_NAME}_V${VERSION}"
 
-            echo "==> 项目名: ${PROJECT_NAME}"
-            echo "==> 版本号: ${VERSION}"
+            echo "==> TAG:      ${TAG_NAME}"
+            echo "==> 项目名:   ${PROJECT_NAME}"
+            echo "==> 版本号:   ${VERSION}"
             echo "==> 目标标题: ${NEW_TITLE}"
 
-            # 尝试多种 API 路径读取网页填写的描述
-            API_PATHS=""
-            API_PATHS="${API_PATHS} ${CNB_API_ENDPOINT}/${CNB_REPO_SLUG}/-/releases"
-            API_PATHS="${API_PATHS} ${CNB_API_ENDPOINT}/repos/${CNB_REPO_SLUG}/releases"
+            # ---------- JSON 工具探测 ----------
+            JSON_TOOL=""
+            if   command -v python3 >/dev/null 2>&1; then JSON_TOOL=python3
+            elif command -v python  >/dev/null 2>&1; then JSON_TOOL=python
+            elif command -v jq      >/dev/null 2>&1; then JSON_TOOL=jq
+            fi
+            echo "==> JSON 工具: ${JSON_TOOL:-无}"
 
+            # ---------- 读取网页填写的描述 ----------
             DESC=""
-            HTTP_OK=0
 
-            for url in ${API_PATHS}; do
-              echo "==> 尝试: ${url}"
+            if [ -n "${JSON_TOOL}" ]; then
+              URL="${CNB_API_ENDPOINT}/${CNB_REPO_SLUG}/-/releases"
+              echo "==> 拉取 Releases: ${URL}"
+
               CODE="$(curl -s -o /tmp/releases.json -w '%{http_code}' \
                 -H "Authorization: Bearer ${CNB_TOKEN}" \
                 -H "accept: application/json" \
-                "${url}" 2>/dev/null || echo 000)"
-              echo "    HTTP ${CODE}"
+                "${URL}" 2>/dev/null || echo 000)"
+              echo "==> API HTTP: ${CODE}"
 
               if [ "${CODE}" = "200" ]; then
-                HTTP_OK=1
-                if command -v grep >/dev/null 2>&1; then
-                  DESC="$(grep -o "\"tag_name\":\"${TAG_NAME}\"[^}]*\"description\":\"[^\"]*\"" \
-                    /tmp/releases.json 2>/dev/null | \
-                    sed 's/.*"description":"\([^"]*\)".*/\1/' | head -n 1 || true)"
-                fi
-                break
-              fi
-            done
+                echo "==> 原始响应（前 2000 字符）:"
+                head -c 2000 /tmp/releases.json
+                echo
 
-            if [ "${HTTP_OK}" != "1" ]; then
-              echo "⚠️ 未能获取 Releases API，跳过标题规范化，保留网页内容"
-              exit 0
+                if [ "${JSON_TOOL}" = "jq" ]; then
+                  DESC="$(jq -r --arg tag "${TAG_NAME}" '
+            (if type=="array" then . else (.releases // []) end)
+            | map(select((.tag_name // .tag)==$tag))
+            | (.[0] // {})
+            | (.body // .description // .desc // .notes // "")
+            ' /tmp/releases.json 2>/dev/null || true)"
+                else
+                  DESC="$("${JSON_TOOL}" -c '
+            import json, sys
+            tag = sys.argv[1]
+            try:
+                with open("/tmp/releases.json") as f:
+                    data = json.load(f)
+            except Exception:
+                sys.exit(0)
+            items = data if isinstance(data, list) else (data or {}).get("releases", [])
+            for r in items:
+                if r.get("tag_name") == tag or r.get("tag") == tag:
+                    sys.stdout.write(r.get("body") or r.get("description")
+                                     or r.get("desc") or r.get("notes") or "")
+                    break
+            ' "${TAG_NAME}" 2>/dev/null || true)"
+                fi
+
+                echo "==> 提取到的描述: [${DESC}]"
+              fi
+            else
+              echo "==> 无 JSON 工具，跳过描述读取（body 将为空）"
             fi
 
-            echo "==> 提取到的描述: [${DESC}]"
+            # ---------- 转义 JSON 特殊字符 ----------
+            # 把 \ 换成 \\，把 " 换成 \"，把换行换成空格
+            escape_json() {
+              printf '%s' "$1" \
+                | tr '\n' ' ' \
+                | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+            }
 
-            # 写入工作区（相对路径，供 git:release 的 descriptionFromFile 使用）
-            printf '%s' "${DESC}" > "release-desc.txt"
-            echo "==> 描述已保存到 release-desc.txt"
+            SAFE_TAG="$(escape_json "${TAG_NAME}")"
+            SAFE_TITLE="$(escape_json "${NEW_TITLE}")"
+            SAFE_DESC="$(escape_json "${DESC}")"
 
-            # 导出后续任务需要的变量
-            echo "${NEW_TITLE}" > "${CNB_BUILD_WORKSPACE}/new-title.txt"
-            echo "==> 标题已保存到 ${CNB_BUILD_WORKSPACE}/new-title.txt"
+            # ---------- 生成 release-options.json（单行）----------
+            printf '{"tag":"%s","title":"%s","body":"%s"}' \
+              "${SAFE_TAG}" "${SAFE_TITLE}" "${SAFE_DESC}" \
+              > release-options.json
+
+            echo "==> 生成的 release-options.json:"
+            cat release-options.json
+            echo
 
         # -----------------------------------------------------------------
-        # 步骤 2：用 git:release 规范化 Release 标题，保留网页描述
+        # 步骤 2：用 optionsFrom 读取 JSON，规范化 Release 标题
         # -----------------------------------------------------------------
         - name: normalize release title
           type: git:release
-          options:
-            tag: "${CNB_TAG:-$CNB_BRANCH}"
-            title: "${PROJECT_NAME}_V${VERSION}"
-            descriptionFromFile: "release-desc.txt"
+          optionsFrom: ./release-options.json
 
         # -----------------------------------------------------------------
         # 步骤 3：同步 tag 到 GitHub
