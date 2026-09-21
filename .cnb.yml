@@ -8,7 +8,7 @@ x-vars:
   # ⚠️ 需要修改：CNB 密钥仓库文件 URL
   secret_repo_url: &secret_repo_url "https://cnb.cool/1983shake/secret-repo/-/blob/main/sync-repo-env.yml"
 
-  # 以下仅作集中备注；实际 GITHUB_REPO / GITHUB_TOKEN 由上面的密钥文件注入
+  # 仅作集中备注；实际 GITHUB_REPO / GITHUB_TOKEN 由密钥文件注入
   github_repo: &github_repo "1983shake/sync-repo"
   cnb_repo: &cnb_repo "cnb.cool/1983shake/sync-repo.git"
 
@@ -29,14 +29,8 @@ x-vars:
 # main 分支同步
 # ============================================================================
 "main":
-  # ---------------------------------------------------------------------------
-  # 事件：push（任何推送都触发）
-  # ---------------------------------------------------------------------------
   push:
     - imports:
-        # ⚠️ 需要修改：替换为你的 CNB 密钥仓库文件 URL
-        # 格式：https://cnb.cool/<组织>/<密钥仓库名>/-/blob/main/<文件名>.yml
-        # 该文件需包含 GITHUB_TOKEN 和 GITHUB_REPO 两个键
         - *secret_repo_url
       stages:
         - name: push main to github (auto-merge + retry)
@@ -45,27 +39,19 @@ x-vars:
             echo "==> 触发事件: push"
             echo "==> 当前分支: ${CNB_BRANCH}"
 
-            # 配置 GitHub 远端
-            # GITHUB_TOKEN 需具备 Contents 和 Workflows 读写权限，
-            # 否则推送包含 .github/workflows/ 的文件时会被 GitHub 拒绝
             git remote remove github 2>/dev/null || true
             git remote add github \
               "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPO}.git"
 
-            # 最多重试 5 次，应对并发写冲突
             for i in 1 2 3 4 5; do
               echo "------ 第 ${i} 次尝试 ------"
               git fetch github main || true
 
-              # 若 GitHub 端已有 main 分支，尝试合并其独有改动
               if git rev-parse --verify github/main >/dev/null 2>&1; then
-                # 内容一致直接跳过
                 if git diff --quiet HEAD github/main; then
                   echo "✅ CNB 与 GitHub 内容一致，无需同步"
                   exit 0
                 fi
-
-                # 合并 GitHub 独有改动，冲突时以 CNB 为准
                 echo "==> 合并 GitHub 上的独有改动（冲突时 CNB 优先）..."
                 if ! git merge --no-edit -X ours github/main; then
                   echo "⚠️ 合并异常，放弃合并，直接用 CNB 覆盖 GitHub"
@@ -73,14 +59,12 @@ x-vars:
                 fi
               fi
 
-              # 推送至 GitHub
               echo "==> 推送至 GitHub..."
               if git push github "HEAD:main" --force; then
                 echo "✅ 推送成功"
                 exit 0
               fi
 
-              # 失败后等待递增时间再重试
               echo "⚠️ 推送失败（远端被并发更新），${i} 秒后重试..."
               sleep "$i"
             done
@@ -88,14 +72,8 @@ x-vars:
             echo "❌ 推送失败，已达最大重试次数。"
             exit 1
 
-  # ---------------------------------------------------------------------------
-  # 事件：commit.add（推送包含新提交时触发）
-  #   相比 push，额外提供 CNB_NEW_COMMITS_COUNT 变量
-  #   与 push 一起配置作为双保险，避免因事件类型不匹配导致不触发
-  # ---------------------------------------------------------------------------
   commit.add:
     - imports:
-        # ⚠️ 需要修改：同上，替换为你的密钥仓库文件 URL
         - *secret_repo_url
       stages:
         - name: sync new commits to github (auto-merge + retry)
@@ -146,153 +124,189 @@ x-vars:
 #     2. 同步 tag 到 GitHub；
 #     3. 构建并推送 Docker 镜像。
 #
-#   标题规范化策略：
-#     - 通过 CNB Releases API 读取当前 tag 的 Release；
-#     - 若读取成功 → 用新标题 + 原描述写回；
-#     - 若读取失败 → 跳过写操作，保留网页填写的内容
-#       （宁可标题不规范，也不覆盖描述）。
+#   实现说明（重要）：
+#     - CNB 不是 GitHub Actions，没有 $GITHUB_OUTPUT / steps.outputs 机制，
+#       所有逻辑必须放在同一个 stage 内，用 shell 自己管理状态。
+#     - 环境可能非常精简（连 python3 都没有），所有外部命令均先探测。
+#     - 工具缺失或 API 异常时，直接跳过标题规范化，保留网页填写的内容。
 # ============================================================================
 "release-v*":
   tag_push:
     - services:
-        # 声明需要 Docker 服务，用于后续构建镜像
         - docker
       imports:
-        # ⚠️ 需要修改：同上，替换为你的密钥仓库文件 URL
         - *secret_repo_url
       stages:
         # -----------------------------------------------------------------
-        # 步骤 1：读取现有 Release 的描述，生成规范化后的 options
-        #   - 标题：<项目名>_V<版本号>
-        #   - 描述：网页"发布版本"时填写的原文
+        # 步骤 1：读取现有 Release 描述，规范化标题，更新 Release
+        #   逻辑全部在一个 stage 内完成：
+        #     探测工具 -> 拉取 API -> 解析 -> 决定是否 PATCH
         # -----------------------------------------------------------------
-        - name: prepare release options (normalize title, keep body)
-          id: prep
+        - name: normalize release title (keep body)
           script: |
             set -e
 
-            # 优先取 CNB_TAG，兼容 CNB_BRANCH
             TAG_NAME="${CNB_TAG:-$CNB_BRANCH}"
-
-            # 项目名：优先从 GITHUB_REPO 提取，兜底用 CNB 仓库名
             PROJECT_NAME="${GITHUB_REPO##*/}"
             if [ -z "$PROJECT_NAME" ]; then
               PROJECT_NAME="${CNB_REPO_NAME:-${CNB_REPO_SLUG##*/}}"
             fi
-
-            # 从 tag 名中剥离前缀得到版本号
-            # 例：release-v1.2.3 -> 1.2.3
             VERSION="${TAG_NAME#release-v}"
-
-            # 规范化标题：<项目名>_V<版本号>
-            # 例：sync-repo_V1.2.3
             NEW_TITLE="${PROJECT_NAME}_V${VERSION}"
 
-            echo "TAG_NAME:     ${TAG_NAME}"
-            echo "项目名:       ${PROJECT_NAME}"
-            echo "版本号:       ${VERSION}"
-            echo "目标标题:     ${NEW_TITLE}"
+            echo "TAG_NAME:   ${TAG_NAME}"
+            echo "项目名:     ${PROJECT_NAME}"
+            echo "版本号:     ${VERSION}"
+            echo "目标标题:   ${NEW_TITLE}"
 
             # =============================================================
-            # 查询 CNB Releases，读取网页填写的描述
-            # ⚠️ 若你的 CNB 版本路径不同，请按实际返回 200 的 URL 调整
-            #    常见两种：
-            #      ${CNB_API_ENDPOINT}/${CNB_REPO_SLUG}/-/releases
-            #      ${CNB_API_ENDPOINT}/repos/${CNB_REPO_SLUG}/releases
+            # 工具探测：curl / python3 / jq
+            # =============================================================
+            HAVE_CURL=0; command -v curl >/dev/null 2>&1 && HAVE_CURL=1
+            PY=""
+            if command -v python3 >/dev/null 2>&1; then PY=python3
+            elif command -v python  >/dev/null 2>&1; then PY=python
+            fi
+            JQ=""
+            command -v jq >/dev/null 2>&1 && JQ=jq
+
+            echo "==> 工具检测: curl=${HAVE_CURL} python=${PY:-无} jq=${JQ:-无}"
+
+            if [ "${HAVE_CURL}" != "1" ]; then
+              echo "⚠️ 无 curl，跳过标题规范化，保留网页内容"
+              exit 0
+            fi
+            if [ -z "${PY}" ] && [ -z "${JQ}" ]; then
+              echo "⚠️ 无 python 也无 jq，跳过标题规范化，保留网页内容"
+              exit 0
+            fi
+
+            # =============================================================
+            # 拉取 Releases 列表
+            # ⚠️ 若你的 CNB 版本 API 路径不同，按实际返回 200 的 URL 调整：
+            #    ${CNB_API_ENDPOINT}/${CNB_REPO_SLUG}/-/releases
+            #    ${CNB_API_ENDPOINT}/repos/${CNB_REPO_SLUG}/releases
+            #    ${CNB_API_ENDPOINT}/repos/${CNB_REPO_SLUG}/-/releases
             # =============================================================
             RELEASES_URL="${CNB_API_ENDPOINT}/${CNB_REPO_SLUG}/-/releases"
             echo "==> 查询 CNB Releases: ${RELEASES_URL}"
 
-            RELEASES_RESP="$(curl -s \
+            HTTP_CODE="$(curl -s -o /tmp/releases.json -w '%{http_code}' \
               -H "Authorization: Bearer ${CNB_TOKEN}" \
               -H "accept: application/json" \
-              "${RELEASES_URL}" 2>/dev/null || true)"
+              "${RELEASES_URL}" 2>/dev/null || echo 000)"
+            echo "==> HTTP 状态码: ${HTTP_CODE}"
 
-            # 用 Python 解析响应并生成 release-options.json
-            # 通过环境变量传参，避免 shell 引号/转义问题
-            RELEASES_RESP="${RELEASES_RESP}" \
-            TAG_NAME="${TAG_NAME}" \
-            NEW_TITLE="${NEW_TITLE}" \
-            python3 - <<'PY'
-            import json, os, sys
+            if [ "${HTTP_CODE}" != "200" ]; then
+              echo "⚠️ Releases API 未返回 200，跳过标题规范化，保留网页内容"
+              exit 0
+            fi
 
-            resp  = os.environ.get("RELEASES_RESP", "")
-            tag   = os.environ["TAG_NAME"]
-            title = os.environ["NEW_TITLE"]
+            # =============================================================
+            # 解析：取出 tag 匹配的 Release 的描述
+            #   优先 jq，其次 python，都没有则已在上面 exit 0
+            # =============================================================
+            RELEASE_DESC=""
+            FOUND=0
 
-            # 兼容多种字段名：body / description / desc / notes
-            def pick_desc(r):
-                return (r.get("body")
-                        or r.get("description")
-                        or r.get("desc")
-                        or r.get("notes")
-                        or "")
+            if [ -n "${JQ}" ]; then
+              echo "==> 使用 jq 解析"
+              FOUND="$(${JQ} -r --arg tag "${TAG_NAME}" '
+                (if type == "array" then . else (.releases // []) end)
+                | map(select((.tag_name // .tag) == $tag))
+                | length
+              ' /tmp/releases.json 2>/dev/null || echo 0)"
+              if [ -n "${FOUND}" ] && [ "${FOUND}" != "0" ]; then
+                RELEASE_DESC="$(${JQ} -r --arg tag "${TAG_NAME}" '
+                  (if type == "array" then . else (.releases // []) end)
+                  | map(select((.tag_name // .tag) == $tag))
+                  | (.[0] // {})
+                  | (.body // .description // .desc // .notes // "")
+                ' /tmp/releases.json 2>/dev/null || true)"
+              fi
+            elif [ -n "${PY}" ]; then
+              echo "==> 使用 ${PY} 解析"
+              EXTRACT="$(TAG_NAME="${TAG_NAME}" "${PY}" - /tmp/releases.json <<'PYEOF'
+import json, os, sys
+tag = os.environ["TAG_NAME"]
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        data = json.load(f)
+except Exception:
+    sys.exit(0)
+items = data if isinstance(data, list) else (data or {}).get("releases", [])
+for r in items:
+    if r.get("tag_name") == tag or r.get("tag") == tag:
+        desc = (r.get("body") or r.get("description")
+                or r.get("desc") or r.get("notes") or "")
+        sys.stdout.write("1\n" + desc)
+        sys.exit(0)
+sys.stdout.write("0\n")
+PYEOF
+)"
+              FOUND="$(printf '%s' "${EXTRACT}" | head -n 1)"
+              RELEASE_DESC="$(printf '%s' "${EXTRACT}" | tail -n +2)"
+            fi
 
-            descr = ""
-            found = False
-            api_ok = True
-            try:
-                if not resp:
-                    api_ok = False
-                else:
-                    data = json.loads(resp)
-                    items = data if isinstance(data, list) else (data or {}).get("releases", [])
-                    for r in items:
-                        if r.get("tag_name") == tag or r.get("tag") == tag:
-                            descr = pick_desc(r)
-                            found = True
-                            break
-            except Exception as e:
-                api_ok = False
-                print(f"⚠️ 解析 CNB Releases 响应失败: {e}", file=sys.stderr)
+            echo "==> 匹配标记: ${FOUND}"
+            echo "==> 提取到的描述: [${RELEASE_DESC}]"
 
-            print(f"API 状态:      {'OK' if api_ok else 'FAIL'}")
-            print(f"匹配到 Release: {found}")
-            print(f"取到描述:      [{descr}]")
+            if [ "${FOUND}" != "1" ]; then
+              echo "⚠️ 未匹配到 tag=${TAG_NAME} 的 Release，跳过标题规范化"
+              exit 0
+            fi
 
-            # 写选项文件：只要 API 状态 OK 就写（即使 descr 为空）
-            # 若 API FAIL，则不写文件，让后续步骤跳过，从而不覆盖网页内容
-            if api_ok:
-                opts = {"tag": tag, "title": title, "body": descr}
-                with open("release-options.json", "w", encoding="utf-8") as f:
-                    json.dump(opts, f, ensure_ascii=False, indent=2)
-                print("生成的 release-options.json:")
-                print(open("release-options.json", encoding="utf-8").read())
-                sys.exit(0)
-            else:
-                sys.exit(2)
-            PY
+            # =============================================================
+            # 直接调用 CNB API 更新 Release 的标题（描述保持不变）
+            # ⚠️ 端点因 CNB 版本而异，常见两种：
+            #    PATCH ${CNB_API_ENDPOINT}/repos/${CNB_REPO_SLUG}/releases/tags/${TAG_NAME}
+            #    PATCH ${CNB_API_ENDPOINT}/${CNB_REPO_SLUG}/-/releases/tags/${TAG_NAME}
+            #    body 字段名可能是 name/title、body/description，
+            #    若报 400，请按返回信息调整下面的 JSON。
+            # =============================================================
+            UPDATE_URL="${CNB_API_ENDPOINT}/${CNB_REPO_SLUG}/-/releases/tags/${TAG_NAME}"
+            echo "==> 更新 Release 标题: ${UPDATE_URL}"
 
-            # 通过 Python 的退出码决定是否继续：
-            #   exit 0 -> 生成文件 -> 允许写回
-            #   exit 2 -> 未生成文件 -> 跳过写回
-            if [ -f release-options.json ]; then
-              echo "UPDATE_RELEASE=1" >> "$GITHUB_OUTPUT"
+            # 用 python 或 jq 生成合法的 JSON body（处理转义）
+            if [ -n "${PY}" ]; then
+              NEW_TITLE="${NEW_TITLE}" RELEASE_DESC="${RELEASE_DESC}" \
+                "${PY}" - <<'PYEOF'
+import json, os
+payload = {"title": os.environ["NEW_TITLE"], "body": os.environ["RELEASE_DESC"]}
+with open("/tmp/patch.json", "w", encoding="utf-8") as f:
+    json.dump(payload, f, ensure_ascii=False)
+PYEOF
             else
-              echo "UPDATE_RELEASE=0" >> "$GITHUB_OUTPUT"
-              echo "⚠️ 未能读取现有 Release，跳过标题规范化，保留网页内容"
+              ${JQ} -n --arg t "${NEW_TITLE}" --arg b "${RELEASE_DESC}" \
+                '{title:$t, body:$b}' > /tmp/patch.json
+            fi
+
+            echo "==> PATCH body:"
+            cat /tmp/patch.json
+
+            PATCH_CODE="$(curl -s -o /tmp/patch.resp -w '%{http_code}' \
+              -X PATCH \
+              -H "Authorization: Bearer ${CNB_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -H "accept: application/json" \
+              --data-binary @/tmp/patch.json \
+              "${UPDATE_URL}" 2>/dev/null || echo 000)"
+            echo "==> PATCH 状态码: ${PATCH_CODE}"
+            head -c 500 /tmp/patch.resp 2>/dev/null; echo
+
+            if [ "${PATCH_CODE}" = "200" ] || [ "${PATCH_CODE}" = "201" ]; then
+              echo "✅ Release 标题已规范化为: ${NEW_TITLE}"
+            else
+              echo "⚠️ 更新失败（HTTP ${PATCH_CODE}），网页内容保持不变"
+              # 不 exit 1：规范化失败不应阻断后续 Docker 构建
             fi
 
         # -----------------------------------------------------------------
-        # 步骤 2：用规范化后的标题写回 Release
-        #   - body 为读取到的原描述，不会丢失网页填写的内容
-        #   - 若上一步判定跳过，则本步骤不执行
-        # -----------------------------------------------------------------
-        - name: create/update release on cnb
-          if: steps.prep.outputs.UPDATE_RELEASE == '1'
-          type: git:release
-          optionsFrom: ./release-options.json
-
-        # -----------------------------------------------------------------
-        # 步骤 3：将 tag 同步到 GitHub
-        #   - 若 tag 源自 GitHub 反向推送，此步为 no-op
-        #   - 若 tag 由 CNB 首次创建，会推送到 GitHub，
-        #     触发 GitHub Actions 建立对应的 GitHub Release
+        # 步骤 2：将 tag 同步到 GitHub
         # -----------------------------------------------------------------
         - name: sync tag to github
           script: |
             set -e
-
             TAG_NAME="${CNB_TAG:-$CNB_BRANCH}"
 
             echo "==> 同步 tag ${TAG_NAME} 到 GitHub"
@@ -313,25 +327,17 @@ x-vars:
             exit 1
 
         # -----------------------------------------------------------------
-        # 步骤 4：构建并推送 Docker 镜像
-        #   镜像 tag：:版本号 和 :latest
-        #   构建上下文：仓库根目录（需要根目录存在 Dockerfile）
+        # 步骤 3：构建并推送 Docker 镜像
         # -----------------------------------------------------------------
         - name: docker build and push
           script: |
             set -e
-
             TAG_NAME="${CNB_TAG:-$CNB_BRANCH}"
-            # IMAGE_BASE 由 CNB 内置变量拼接而成：
-            #   CNB_DOCKER_REGISTRY     -> CNB 镜像仓库地址
-            #   CNB_REPO_SLUG_LOWERCASE -> 仓库 slug（全小写）
             IMAGE_BASE="${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}"
-            # 从 tag 名中剥离前缀得到版本号
             VERSION="${TAG_NAME#release-v}"
             echo "==> 构建版本: ${VERSION}"
 
-            # ⚠️ 可选：如需把版本号注入镜像，取消下面一行的注释
-            # 同时需在 Dockerfile 中声明 ARG APP_VERSION
+            # ⚠️ 可选：如需把版本号注入镜像，取消注释并在 Dockerfile 声明 ARG
             # docker build --build-arg APP_VERSION="${VERSION}" \
             docker build \
               -t "${IMAGE_BASE}:${VERSION}" \
