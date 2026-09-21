@@ -141,7 +141,7 @@ x-vars:
 # release-v* 标签流水线
 #   功能：建 CNB Release -> 同步 tag 到 GitHub -> 构建并推送 Docker 镜像
 #   描述来源：
-#     优先通过 CNB OpenAPI 查询网页发布时填写的描述；
+#     优先通过 CNB Releases API 查询网页发布时填写的描述；
 #     若查询失败或为空，则回退到默认模板。
 # ============================================================================
 "release-v*":
@@ -155,7 +155,7 @@ x-vars:
       stages:
         # -----------------------------------------------------------------
         # 步骤 1：解析版本号与项目名，生成 Release 配置
-        #   关键：通过 CNB OpenAPI 查询网页发布时填写的描述
+        #   关键：通过 CNB Releases API 查询网页发布时填写的描述
         # -----------------------------------------------------------------
         - name: prepare release
           script: |
@@ -181,7 +181,7 @@ x-vars:
             echo "版本号: ${VERSION}"
 
             # ==================================================================
-            # 通过 CNB OpenAPI 查询该 Tag 对应的 ReleaseEvent，
+            # 通过 CNB Releases API 查询该 Tag 对应的 Release，
             # 获取网页发布时填写的标题与描述。
             #   - CNB_API_ENDPOINT / CNB_TOKEN / CNB_REPO_SLUG 均为流水线内置变量
             #   - 若你的 CNB 版本变量名不同，请按实际调整
@@ -189,55 +189,44 @@ x-vars:
             RELEASE_TITLE=""
             RELEASE_DESC=""
 
-            # 查询最近 1 小时的仓库动态（按小时粒度）
-            EVENTS_DATE="$(date -u +%Y-%m-%d-%H)"
-            EVENTS_URL="${CNB_API_ENDPOINT}/events/${CNB_REPO_SLUG}/-/${EVENTS_DATE}"
+            RELEASES_URL="${CNB_API_ENDPOINT}/repos/${CNB_REPO_SLUG}/releases"
+            echo "==> 查询 CNB Releases: ${RELEASES_URL}"
 
-            echo "==> 查询 CNB Events: ${EVENTS_URL}"
-
-            EVENTS_RESP="$(curl -s \
+            RELEASES_RESP="$(curl -s \
               -H "Authorization: Bearer ${CNB_TOKEN}" \
               -H "accept: application/json" \
-              "${EVENTS_URL}" 2>/dev/null)" || true
+              "${RELEASES_URL}" 2>/dev/null)" || true
 
-            # 从事件列表中筛选 type=ReleaseEvent 且匹配当前 Tag 的事件，
-            # 提取 title / description 字段
-            if [ -n "${EVENTS_RESP}" ]; then
-              RELEASE_TITLE="$(printf '%s' "${EVENTS_RESP}" | \
+            # 从 Release 列表中筛选 tag_name 匹配当前 Tag 的 Release，
+            # 提取 title / description（或 body）字段
+            if [ -n "${RELEASES_RESP}" ]; then
+              RELEASE_TITLE="$(printf '%s' "${RELEASES_RESP}" | \
                 python3 -c "
             import sys, json
             try:
                 data = json.load(sys.stdin)
             except Exception:
                 sys.exit(0)
-            events = data if isinstance(data, list) else data.get('events', [])
+            releases = data if isinstance(data, list) else data.get('releases', [])
             tag = '${TAG_NAME}'
-            for e in events:
-                if e.get('type') != 'ReleaseEvent':
-                    continue
-                p = e.get('payload', {}) or {}
-                ref = p.get('ref') or p.get('tag') or ''
-                if tag in str(ref) or tag in str(p):
-                    print(p.get('title') or p.get('name') or '')
+            for r in releases:
+                if r.get('tag_name') == tag or r.get('tag') == tag:
+                    print(r.get('title') or r.get('name') or '')
                     break
             " 2>/dev/null)" || true
 
-              RELEASE_DESC="$(printf '%s' "${EVENTS_RESP}" | \
+              RELEASE_DESC="$(printf '%s' "${RELEASES_RESP}" | \
                 python3 -c "
             import sys, json
             try:
                 data = json.load(sys.stdin)
             except Exception:
                 sys.exit(0)
-            events = data if isinstance(data, list) else data.get('events', [])
+            releases = data if isinstance(data, list) else data.get('releases', [])
             tag = '${TAG_NAME}'
-            for e in events:
-                if e.get('type') != 'ReleaseEvent':
-                    continue
-                p = e.get('payload', {}) or {}
-                ref = p.get('ref') or p.get('tag') or ''
-                if tag in str(ref) or tag in str(p):
-                    print(p.get('description') or p.get('body') or '')
+            for r in releases:
+                if r.get('tag_name') == tag or r.get('tag') == tag:
+                    print(r.get('description') or r.get('body') or '')
                     break
             " 2>/dev/null)" || true
             fi
