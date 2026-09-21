@@ -461,3 +461,4 @@ GitHub PAT 缺少 `Workflows` 权限。进入 Token 编辑页面，在 **Reposit
 3. **定期轮换 Token**：设置合理过期时间，及时更新密钥仓库中的 `GITHUB_TOKEN`。  
 4. **监控流水线**：定期查看 CNB 构建历史和 GitHub Actions 运行记录。  
 5. **避免自动改写历史**：不要配置自动 amend 或 rebase 后强推的钩子，否则会破坏防循环机制。
+6.
