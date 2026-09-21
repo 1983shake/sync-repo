@@ -1,15 +1,6 @@
-# ============================================================================
-# CNB 流水线配置（最终修正版）
-#   功能：
-#     1. main 分支 push/commit.add -> 同步到 GitHub main
-#     2. release-v* tag -> 建 CNB Release + 同步 tag 到 GitHub + 构建 Docker 镜像
-# ============================================================================
-
 "main":
-  # 双事件保险：同时配置 push 和 commit.add，避免因事件类型不匹配导致不触发
   push:
     - imports:
-        # - https://cnb.cool/1983shake/cnb-secrets/-/blob/main/envs.yml
         - https://cnb.cool/1983shake/secret-repo/-/blob/main/sync-repo-env.yml
       stages:
         - name: push main to github
@@ -20,11 +11,30 @@
             git remote remove github 2>/dev/null || true
             git remote add github \
               "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPO}.git"
-            git push github "HEAD:main" --force
+            echo "==> 拉取 GitHub 最新更改..."
+            git fetch github main
+            git rebase github/main || {
+              echo "❌ Rebase 失败，可能存在合并冲突，请手动处理。"
+              exit 1
+            }
+            for i in 1 2 3; do
+              echo "==> 尝试推送 (第 ${i} 次)..."
+              if git push github "HEAD:main" --force-with-lease; then
+                echo "✅ 推送成功"
+                break
+              else
+                echo "⚠️ 推送失败，等待 ${i}0 秒后重试..."
+                sleep ${i}0
+                git fetch github main
+              fi
+              if [ $i -eq 3 ]; then
+                echo "❌ 推送失败，已达最大重试次数。"
+                exit 1
+              fi
+            done
             echo "==> main 同步完成"
   commit.add:
     - imports:
-        # - https://cnb.cool/1983shake/cnb-secrets/-/blob/main/envs.yml
         - https://cnb.cool/1983shake/secret-repo/-/blob/main/sync-repo-env.yml
       stages:
         - name: sync new commits to github
@@ -36,7 +46,27 @@
             git remote remove github 2>/dev/null || true
             git remote add github \
               "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPO}.git"
-            git push github "HEAD:main" --force
+            echo "==> 拉取 GitHub 最新更改..."
+            git fetch github main
+            git rebase github/main || {
+              echo "❌ Rebase 失败，可能存在合并冲突，请手动处理。"
+              exit 1
+            }
+            for i in 1 2 3; do
+              echo "==> 尝试推送 (第 ${i} 次)..."
+              if git push github "HEAD:main" --force-with-lease; then
+                echo "✅ 推送成功"
+                break
+              else
+                echo "⚠️ 推送失败，等待 ${i}0 秒后重试..."
+                sleep ${i}0
+                git fetch github main
+              fi
+              if [ $i -eq 3 ]; then
+                echo "❌ 推送失败，已达最大重试次数。"
+                exit 1
+              fi
+            done
             echo "==> main 同步完成"
 
 "release-v*":
@@ -44,7 +74,6 @@
     - services:
         - docker
       imports:
-        # - https://cnb.cool/1983shake/cnb-secrets/-/blob/main/envs.yml
         - https://cnb.cool/1983shake/secret-repo/-/blob/main/sync-repo-env.yml
       stages:
         - name: prepare release
@@ -72,8 +101,21 @@
             git remote remove github 2>/dev/null || true
             git remote add github \
               "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPO}.git"
-            git push github \
-              "refs/tags/${CNB_BRANCH}:refs/tags/${CNB_BRANCH}" --force
+            for i in 1 2 3; do
+              echo "==> 尝试推送标签 (第 ${i} 次)..."
+              if git push github \
+                "refs/tags/${CNB_BRANCH}:refs/tags/${CNB_BRANCH}" --force; then
+                echo "✅ 标签推送成功"
+                break
+              else
+                echo "⚠️ 标签推送失败，等待 ${i}0 秒后重试..."
+                sleep ${i}0
+              fi
+              if [ $i -eq 3 ]; then
+                echo "❌ 标签推送失败，已达最大重试次数。"
+                exit 1
+              fi
+            done
             echo "==> tag 同步完成"
 
         - name: docker build and push
