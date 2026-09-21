@@ -106,7 +106,6 @@ GITHUB_REPO: 1983shake/sync-repo        # 【需修改】填入 GitHub 仓库路
               echo "❌ Rebase 失败，可能存在合并冲突，请手动处理。"
               exit 1
             }
-
             # 3. 带重试机制的推送（最多重试 3 次）
             for i in 1 2 3; do
               echo "==> 尝试推送 (第 ${i} 次)..."
@@ -139,14 +138,12 @@ GITHUB_REPO: 1983shake/sync-repo        # 【需修改】填入 GitHub 仓库路
             git remote remove github 2>/dev/null || true
             git remote add github \
               "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPO}.git"
-
             echo "==> 拉取 GitHub 最新更改..."
             git fetch github main
             git rebase github/main || {
               echo "❌ Rebase 失败，可能存在合并冲突，请手动处理。"
               exit 1
             }
-
             for i in 1 2 3; do
               echo "==> 尝试推送 (第 ${i} 次)..."
               if git push github "HEAD:main" --force-with-lease; then
