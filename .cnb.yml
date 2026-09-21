@@ -114,12 +114,8 @@ x-vars:
 #     2. 同步 tag 到 GitHub
 #     3. 构建并推送 Docker 镜像
 #
-#   实现注意：
-#     - CNB 不是 GitHub Actions：没有 $GITHUB_OUTPUT / steps.outputs
-#     - 全部逻辑放在一个 stage 内
-#     - 不使用 heredoc（会破坏 YAML 块标量缩进）
-#     - python 用 -c '...' 单行字符串，jq 优先
-#     - 工具缺失 / API 异常时优雅降级，不阻断 Docker 构建
+#   ⚠️ 关键：嵌入 script 的 Python 代码每一行必须与 YAML 块内容基线
+#     同缩进（12 个空格），否则会破坏 YAML 块标量。
 # ============================================================================
 "release-v*":
   tag_push:
@@ -185,73 +181,59 @@ x-vars:
               exit 0
             fi
 
-            # ---------- 解析：找出 tag 匹配的 Release 的描述 ----------
-            FOUND=0
-            RELEASE_DESC=""
+            # ---------- 生成 /tmp/patch.json ----------
+            rm -f /tmp/patch.json
 
             if [ -n "$JQ" ]; then
               echo "==> 使用 jq 解析"
-              FOUND="$(${JQ} -r --arg tag "${TAG_NAME}" \
-                '(if type=="array" then . else (.releases // []) end) | map(select((.tag_name // .tag)==$tag)) | length' \
-                /tmp/releases.json 2>/dev/null || echo 0)"
-              if [ -n "${FOUND}" ] && [ "${FOUND}" != "0" ]; then
-                RELEASE_DESC="$(${JQ} -r --arg tag "${TAG_NAME}" \
-                  '(if type=="array" then . else (.releases // []) end) | map(select((.tag_name // .tag)==$tag)) | (.[0] // {}) | (.body // .description // .desc // .notes // "")' \
-                  /tmp/releases.json 2>/dev/null || true)"
+              RELEASE_DESC="$(${JQ} -r --arg tag "${TAG_NAME}" \
+            '(if type=="array" then . else (.releases // []) end) | map(select((.tag_name // .tag)==$tag)) | (.[0] // {}) | (.body // .description // .desc // .notes // "")' \
+            /tmp/releases.json 2>/dev/null || true)"
+              MATCH_N="$(${JQ} -r --arg tag "${TAG_NAME}" \
+            '(if type=="array" then . else (.releases // []) end) | map(select((.tag_name // .tag)==$tag)) | length' \
+            /tmp/releases.json 2>/dev/null || echo 0)"
+              if [ -n "${MATCH_N}" ] && [ "${MATCH_N}" != "0" ]; then
+                ${JQ} -n --arg t "${NEW_TITLE}" --arg b "${RELEASE_DESC}" \
+            '{title:$t, body:$b}' > /tmp/patch.json
               fi
             elif [ -n "$PY" ]; then
               echo "==> 使用 ${PY} 解析"
-              EXTRACT="$(TAG_NAME="${TAG_NAME}" "${PY}" -c '
-import json, os, sys
-tag = os.environ["TAG_NAME"]
-try:
-    with open(sys.argv[1], encoding="utf-8") as f:
-        data = json.load(f)
-except Exception:
-    sys.stdout.write("0@")
-    sys.exit(0)
-items = data if isinstance(data, list) else (data or {}).get("releases", [])
-for r in items:
-    if r.get("tag_name") == tag or r.get("tag") == tag:
-        desc = (r.get("body") or r.get("description") or r.get("desc") or r.get("notes") or "")
-        sys.stdout.write("1@" + desc)
-        sys.exit(0)
-sys.stdout.write("0@")
-' /tmp/releases.json)"
-              FOUND="$(printf '%s' "${EXTRACT}" | cut -d@ -f1)"
-              RELEASE_DESC="$(printf '%s' "${EXTRACT}" | cut -d@ -f2-)"
+              TAG_NAME="${TAG_NAME}" NEW_TITLE="${NEW_TITLE}" "${PY}" -c '
+            import json, os, sys
+            tag = os.environ["TAG_NAME"]
+            title = os.environ["NEW_TITLE"]
+            try:
+                with open(sys.argv[1], encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception as e:
+                print("解析失败: %s" % e, file=sys.stderr)
+                sys.exit(0)
+            items = data if isinstance(data, list) else (data or {}).get("releases", [])
+            for r in items:
+                if r.get("tag_name") == tag or r.get("tag") == tag:
+                    desc = (r.get("body") or r.get("description")
+                            or r.get("desc") or r.get("notes") or "")
+                    with open("/tmp/patch.json", "w", encoding="utf-8") as f:
+                        json.dump({"title": title, "body": desc}, f, ensure_ascii=False)
+                    sys.exit(0)
+            ' /tmp/releases.json
             fi
 
-            echo "==> 匹配标记: ${FOUND}"
-            echo "==> 提取到的描述: [${RELEASE_DESC}]"
-
-            if [ "${FOUND}" != "1" ]; then
+            if [ ! -f /tmp/patch.json ]; then
               echo "⚠️ 未匹配到 tag=${TAG_NAME} 的 Release，跳过标题规范化"
               exit 0
-            fi
-
-            # ---------- 生成 PATCH body ----------
-            if [ -n "$PY" ]; then
-              NEW_TITLE="${NEW_TITLE}" RELEASE_DESC="${RELEASE_DESC}" "${PY}" -c '
-import json, os
-payload = {"title": os.environ["NEW_TITLE"], "body": os.environ["RELEASE_DESC"]}
-with open("/tmp/patch.json", "w", encoding="utf-8") as f:
-    json.dump(payload, f, ensure_ascii=False)
-'
-            else
-              ${JQ} -n --arg t "${NEW_TITLE}" --arg b "${RELEASE_DESC}" \
-                '{title:$t, body:$b}' > /tmp/patch.json
             fi
 
             echo "==> PATCH body:"
             cat /tmp/patch.json
             echo
 
-            # ---------- 调用 API 更新标题 ----------
-            # ⚠️ 端点与字段名可能因 CNB 版本而异；若返回 404/400，参考日志调整：
-            #    端点常见：${CNB_API_ENDPOINT}/${CNB_REPO_SLUG}/-/releases/tags/${TAG_NAME}
-            #              ${CNB_API_ENDPOINT}/repos/${CNB_REPO_SLUG}/releases/tags/${TAG_NAME}
-            #    字段常见：title / name、body / description
+            # ---------- 更新 Release 标题 ----------
+            # ⚠️ 端点/字段名因 CNB 版本而异，若 404/400 请按日志调整：
+            #    端点备用：
+            #      ${CNB_API_ENDPOINT}/repos/${CNB_REPO_SLUG}/releases/tags/${TAG_NAME}
+            #    字段备用：
+            #      title / name、body / description
             UPDATE_URL="${CNB_API_ENDPOINT}/${CNB_REPO_SLUG}/-/releases/tags/${TAG_NAME}"
             PATCH_CODE="$(curl -s -o /tmp/patch.resp -w '%{http_code}' \
               -X PATCH \
