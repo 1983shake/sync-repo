@@ -110,14 +110,15 @@ x-vars:
 # ============================================================================
 # release-v* 标签流水线
 #   功能：
-#     1. 规范化 CNB Release 标题为 "<项目名>_V<版本号>"
+#     1. 规范化 CNB Release 标题为 "<项目名>_V<版本号>"，保留网页描述
 #     2. 同步 tag 到 GitHub
 #     3. 构建并推送 Docker 镜像
 #
 #   核心策略：
-#     - 在同一 stage 内生成 release-options.json（含 tag/title/body）
-#       彻底避免跨 stage 变量不传递的问题
-#     - 用 optionsFrom 读取 JSON，让 git:release 使用正确的 title
+#     - 同一 stage 内生成 release-options.json（含 tag/title/description）
+#     - 用 optionsFrom 读取 JSON，让 git:release 使用正确的 title 与描述
+#     - ⚠️ git:release 的 JSON 使用 description 字段（不是 body）
+#        注意：CNB 公开 API 返回的字段叫 body，但 git:release 插件接收的是 description
 # ============================================================================
 "release-v*":
   tag_push:
@@ -128,7 +129,6 @@ x-vars:
       stages:
         # -----------------------------------------------------------------
         # 步骤 1：生成 release-options.json
-        #   包含 tag / title / body（网页填写的描述，若提取不到则为空）
         # -----------------------------------------------------------------
         - name: prepare release options
           script: |
@@ -153,6 +153,7 @@ x-vars:
             echo "==> JSON 工具: ${JSON_TOOL:-无}"
 
             # ---------- 读取网页填写的描述 ----------
+            #   注意：API 返回的字段名是 body
             DESC=""
 
             if [ -n "${JSON_TOOL}" ]; then
@@ -166,10 +167,6 @@ x-vars:
               echo "==> API HTTP: ${CODE}"
 
               if [ "${CODE}" = "200" ]; then
-                echo "==> 原始响应（前 2000 字符）:"
-                head -c 2000 /tmp/releases.json
-                echo
-
                 if [ "${JSON_TOOL}" = "jq" ]; then
                   DESC="$(jq -r --arg tag "${TAG_NAME}" '
             (if type=="array" then . else (.releases // []) end)
@@ -198,11 +195,10 @@ x-vars:
                 echo "==> 提取到的描述: [${DESC}]"
               fi
             else
-              echo "==> 无 JSON 工具，跳过描述读取（body 将为空）"
+              echo "==> 无 JSON 工具，跳过描述读取（description 将为空）"
             fi
 
             # ---------- 转义 JSON 特殊字符 ----------
-            # 把 \ 换成 \\，把 " 换成 \"，把换行换成空格
             escape_json() {
               printf '%s' "$1" \
                 | tr '\n' ' ' \
@@ -214,7 +210,9 @@ x-vars:
             SAFE_DESC="$(escape_json "${DESC}")"
 
             # ---------- 生成 release-options.json（单行）----------
-            printf '{"tag":"%s","title":"%s","body":"%s"}' \
+            # ⚠️ 关键：使用 description 字段（不是 body）
+            #    git:release 插件的 schema 只识别 description
+            printf '{"tag":"%s","title":"%s","description":"%s"}' \
               "${SAFE_TAG}" "${SAFE_TITLE}" "${SAFE_DESC}" \
               > release-options.json
 
@@ -223,7 +221,7 @@ x-vars:
             echo
 
         # -----------------------------------------------------------------
-        # 步骤 2：用 optionsFrom 读取 JSON，规范化 Release 标题
+        # 步骤 2：用 optionsFrom 读取 JSON，规范化 Release 标题与描述
         # -----------------------------------------------------------------
         - name: normalize release title
           type: git:release
