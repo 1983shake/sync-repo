@@ -17,7 +17,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # 替换为你的 CNB 仓库实际地址
+  # ⚠️ 需要修改：替换为你的 CNB 仓库实际地址
   CNB_REPO: cnb.cool/1983shake/sync-repo.git
 
 jobs:
@@ -103,7 +103,8 @@ jobs:
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/release-v')
-        uses: softprops/action-gh-release@v2
+        # ✅ 修改这里：将 @v2 升级到 @v3
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ steps.version.outputs.PROJECT_NAME }}_V${{ steps.version.outputs.VERSION }}
