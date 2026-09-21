@@ -16,9 +16,8 @@ x-vars:
 # CNB 流水线配置
 #   功能：
 #     1. main 分支 push / commit.add -> 合并 GitHub 改动后推送 main（CNB 优先）
-#     2. release-v* tag -> 同步 tag 到 GitHub + 构建 Docker 镜像
-#        （Release 由 CNB 网页“发布版本”时自动创建，流水线不再重复创建，
-#          从而保留网页填写的标题与描述）
+#     2. release-v* tag -> 规范化 CNB Release 标题（保留网页填写的描述）
+#                        + 同步 tag 到 GitHub + 构建 Docker 镜像
 #   引用：
 #     密钥仓库 sync-repo-env.yml（提供 GITHUB_TOKEN / GITHUB_REPO）
 #   触发时机：
@@ -141,15 +140,17 @@ x-vars:
 
 # ============================================================================
 # release-v* 标签流水线
-#   功能：同步 tag 到 GitHub + 构建并推送 Docker 镜像
+#   功能：
+#     1. 规范化 CNB Release 标题为 "<项目名>_V<版本号>"，
+#        同时保留网页"发布版本"时填写的描述；
+#     2. 同步 tag 到 GitHub；
+#     3. 构建并推送 Docker 镜像。
 #
-#   说明（重要）：
-#     Release 的标题与描述由 CNB 网页“发布版本”时填写，CNB 会自动创建 Release；
-#     本流水线**不再调用 git:release**，从而避免用默认模板覆盖网页填写的描述。
-#
-#     - 若需要从命令行直接 `git push` tag 也能自动建 Release，
-#       可另开一条独立 workflow 或使用 CNB 的 stage 级 if 条件，
-#       不要在本流水线里无条件调用 git:release。
+#   标题规范化策略：
+#     - 通过 CNB Releases API 读取当前 tag 的 Release；
+#     - 若读取成功 → 用新标题 + 原描述写回；
+#     - 若读取失败 → 跳过写操作，保留网页填写的内容
+#       （宁可标题不规范，也不覆盖描述）。
 # ============================================================================
 "release-v*":
   tag_push:
@@ -161,19 +162,20 @@ x-vars:
         - *secret_repo_url
       stages:
         # -----------------------------------------------------------------
-        # 步骤 1：解析版本号与项目名（仅用于日志展示）
+        # 步骤 1：读取现有 Release 的描述，生成规范化后的 options
+        #   - 标题：<项目名>_V<版本号>
+        #   - 描述：网页"发布版本"时填写的原文
         # -----------------------------------------------------------------
-        - name: prepare release
+        - name: prepare release options (normalize title, keep body)
+          id: prep
           script: |
             set -e
 
             # 优先取 CNB_TAG，兼容 CNB_BRANCH
             TAG_NAME="${CNB_TAG:-$CNB_BRANCH}"
 
-            # 从 GITHUB_REPO 中提取项目名
-            # 例：1983shake/sync-repo -> sync-repo
+            # 项目名：优先从 GITHUB_REPO 提取，兜底用 CNB 仓库名
             PROJECT_NAME="${GITHUB_REPO##*/}"
-            # 兜底：若 GITHUB_REPO 为空，则使用 CNB 仓库名
             if [ -z "$PROJECT_NAME" ]; then
               PROJECT_NAME="${CNB_REPO_NAME:-${CNB_REPO_SLUG##*/}}"
             fi
@@ -182,13 +184,107 @@ x-vars:
             # 例：release-v1.2.3 -> 1.2.3
             VERSION="${TAG_NAME#release-v}"
 
-            echo "TAG_NAME: ${TAG_NAME}"
-            echo "项目名: ${PROJECT_NAME}"
-            echo "版本号: ${VERSION}"
-            echo "==> Release 标题与描述由 CNB 网页填写，流水线不再覆盖"
+            # 规范化标题：<项目名>_V<版本号>
+            # 例：sync-repo_V1.2.3
+            NEW_TITLE="${PROJECT_NAME}_V${VERSION}"
+
+            echo "TAG_NAME:     ${TAG_NAME}"
+            echo "项目名:       ${PROJECT_NAME}"
+            echo "版本号:       ${VERSION}"
+            echo "目标标题:     ${NEW_TITLE}"
+
+            # =============================================================
+            # 查询 CNB Releases，读取网页填写的描述
+            # ⚠️ 若你的 CNB 版本路径不同，请按实际返回 200 的 URL 调整
+            #    常见两种：
+            #      ${CNB_API_ENDPOINT}/${CNB_REPO_SLUG}/-/releases
+            #      ${CNB_API_ENDPOINT}/repos/${CNB_REPO_SLUG}/releases
+            # =============================================================
+            RELEASES_URL="${CNB_API_ENDPOINT}/${CNB_REPO_SLUG}/-/releases"
+            echo "==> 查询 CNB Releases: ${RELEASES_URL}"
+
+            RELEASES_RESP="$(curl -s \
+              -H "Authorization: Bearer ${CNB_TOKEN}" \
+              -H "accept: application/json" \
+              "${RELEASES_URL}" 2>/dev/null || true)"
+
+            # 用 Python 解析响应并生成 release-options.json
+            # 通过环境变量传参，避免 shell 引号/转义问题
+            RELEASES_RESP="${RELEASES_RESP}" \
+            TAG_NAME="${TAG_NAME}" \
+            NEW_TITLE="${NEW_TITLE}" \
+            python3 - <<'PY'
+            import json, os, sys
+
+            resp  = os.environ.get("RELEASES_RESP", "")
+            tag   = os.environ["TAG_NAME"]
+            title = os.environ["NEW_TITLE"]
+
+            # 兼容多种字段名：body / description / desc / notes
+            def pick_desc(r):
+                return (r.get("body")
+                        or r.get("description")
+                        or r.get("desc")
+                        or r.get("notes")
+                        or "")
+
+            descr = ""
+            found = False
+            api_ok = True
+            try:
+                if not resp:
+                    api_ok = False
+                else:
+                    data = json.loads(resp)
+                    items = data if isinstance(data, list) else (data or {}).get("releases", [])
+                    for r in items:
+                        if r.get("tag_name") == tag or r.get("tag") == tag:
+                            descr = pick_desc(r)
+                            found = True
+                            break
+            except Exception as e:
+                api_ok = False
+                print(f"⚠️ 解析 CNB Releases 响应失败: {e}", file=sys.stderr)
+
+            print(f"API 状态:      {'OK' if api_ok else 'FAIL'}")
+            print(f"匹配到 Release: {found}")
+            print(f"取到描述:      [{descr}]")
+
+            # 写选项文件：只要 API 状态 OK 就写（即使 descr 为空）
+            # 若 API FAIL，则不写文件，让后续步骤跳过，从而不覆盖网页内容
+            if api_ok:
+                opts = {"tag": tag, "title": title, "body": descr}
+                with open("release-options.json", "w", encoding="utf-8") as f:
+                    json.dump(opts, f, ensure_ascii=False, indent=2)
+                print("生成的 release-options.json:")
+                print(open("release-options.json", encoding="utf-8").read())
+                sys.exit(0)
+            else:
+                sys.exit(2)
+            PY
+
+            # 通过 Python 的退出码决定是否继续：
+            #   exit 0 -> 生成文件 -> 允许写回
+            #   exit 2 -> 未生成文件 -> 跳过写回
+            if [ -f release-options.json ]; then
+              echo "UPDATE_RELEASE=1" >> "$GITHUB_OUTPUT"
+            else
+              echo "UPDATE_RELEASE=0" >> "$GITHUB_OUTPUT"
+              echo "⚠️ 未能读取现有 Release，跳过标题规范化，保留网页内容"
+            fi
 
         # -----------------------------------------------------------------
-        # 步骤 2：将 tag 同步到 GitHub
+        # 步骤 2：用规范化后的标题写回 Release
+        #   - body 为读取到的原描述，不会丢失网页填写的内容
+        #   - 若上一步判定跳过，则本步骤不执行
+        # -----------------------------------------------------------------
+        - name: create/update release on cnb
+          if: steps.prep.outputs.UPDATE_RELEASE == '1'
+          type: git:release
+          optionsFrom: ./release-options.json
+
+        # -----------------------------------------------------------------
+        # 步骤 3：将 tag 同步到 GitHub
         #   - 若 tag 源自 GitHub 反向推送，此步为 no-op
         #   - 若 tag 由 CNB 首次创建，会推送到 GitHub，
         #     触发 GitHub Actions 建立对应的 GitHub Release
@@ -217,11 +313,9 @@ x-vars:
             exit 1
 
         # -----------------------------------------------------------------
-        # 步骤 3：构建并推送 Docker 镜像
+        # 步骤 4：构建并推送 Docker 镜像
         #   镜像 tag：:版本号 和 :latest
         #   构建上下文：仓库根目录（需要根目录存在 Dockerfile）
-        #   无论是 CNB 本地打的 tag，还是 GitHub 推送过来的 tag，
-        #   都会进入这一步，实现"release 即自动构建镜像"
         # -----------------------------------------------------------------
         - name: docker build and push
           script: |
