@@ -26,6 +26,10 @@
                 echo "⚠️ 推送失败，等待 ${i}0 秒后重试..."
                 sleep ${i}0
                 git fetch github main
+                git rebase github/main || {
+                  echo "❌ Rebase 失败，可能存在合并冲突，请手动处理。"
+                  exit 1
+                }
               fi
               if [ $i -eq 3 ]; then
                 echo "❌ 推送失败，已达最大重试次数。"
@@ -61,6 +65,10 @@
                 echo "⚠️ 推送失败，等待 ${i}0 秒后重试..."
                 sleep ${i}0
                 git fetch github main
+                git rebase github/main || {
+                  echo "❌ Rebase 失败，可能存在合并冲突，请手动处理。"
+                  exit 1
+                }
               fi
               if [ $i -eq 3 ]; then
                 echo "❌ 推送失败，已达最大重试次数。"
@@ -79,12 +87,17 @@
         - name: prepare release
           script: |
             set -e
+            PROJECT_NAME="${GITHUB_REPO##*/}"
+            if [ -z "$PROJECT_NAME" ]; then
+              PROJECT_NAME="${CNB_REPO_NAME:-${CNB_REPO_SLUG##*/}}"
+            fi
             VERSION="${CNB_BRANCH#release-v}"
+            echo "项目名: ${PROJECT_NAME}"
             echo "版本号: ${VERSION}"
             cat > release-options.json <<EOF
             {
-              "title": "Vael-Mux_V${VERSION}",
-              "description": "Release Vael-Mux V${VERSION}"
+              "title": "${PROJECT_NAME}_V${VERSION}",
+              "description": "Release ${PROJECT_NAME} V${VERSION}"
             }
             EOF
             echo "生成的 Release 配置："
