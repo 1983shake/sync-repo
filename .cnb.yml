@@ -152,8 +152,6 @@ x-vars:
       stages:
         # -----------------------------------------------------------------
         # 步骤 1：解析版本号与项目名，生成 Release 配置
-        #   注意：CNB 的 git:release 与 GitHub Release API 对齐，
-        #   使用 name / body 字段，而非 title / description。
         # -----------------------------------------------------------------
         - name: prepare release
           script: |
@@ -172,12 +170,11 @@ x-vars:
             echo "版本号: ${VERSION}"
 
             # 生成 Release 配置文件
-            # ⚠️ 字段名必须是 name / body（与 GitHub Release API 一致）
-            # ⚠️ 可修改：name 和 body 的模板可按需调整
+            # ⚠️ 可修改：标题和描述的模板可按需调整
             cat > release-options.json <<EOF
             {
-              "name": "${PROJECT_NAME}_V${VERSION}",
-              "body": "Release ${PROJECT_NAME} V${VERSION}"
+              "title": "${PROJECT_NAME}_V${VERSION}",
+              "description": "Release ${PROJECT_NAME} V${VERSION}"
             }
             EOF
             echo "生成的 Release 配置："

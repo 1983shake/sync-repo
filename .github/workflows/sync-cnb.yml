@@ -163,10 +163,10 @@ jobs:
       #   仅在 tag 推送时执行
       #   使用 v3 版本以兼容 Node.js 24（v2 基于已弃用的 Node.js 20）
       #   name 使用 "{项目名}_V{版本号}" 格式，与 CNB 侧 Release 命名一致
-      #   ⚠️ 关键：显式传入 name，避免 GitHub 自动生成标题（可能取 commit message）
       # ----------------------------------------------------------------------
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/release-v')
+        # ⚠️ 说明：v3 基于 Node.js 24，v2 基于已弃用的 Node.js 20
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
