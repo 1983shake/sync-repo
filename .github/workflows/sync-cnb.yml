@@ -3,8 +3,9 @@
 #   功能：
 #     1. 推送 main 分支 -> 合并 CNB 独有改动后推送 main（GitHub 优先）
 #     2. 推送 release-v* tag -> 同步 tag 到 CNB + 在 GitHub 创建 Release
+#        （Release 描述优先从 CNB 拉取，保留 CNB 网页上填写的内容）
 #   依赖：
-#     - Repository Secret: GIT_PASSWORD（CNB 访问令牌，具备仓库写权限）
+#     - Repository Secret: GIT_PASSWORD（CNB 访问令牌，具备仓库写权限 + 读 Release 权限）
 #   触发时机：
 #     - main 分支 push
 #     - release-v* 标签 push
@@ -34,6 +35,13 @@ env:
 
   # ⚠️ 需要修改：存放 CNB 访问令牌的 GitHub Secret 名称
   CNB_TOKEN_SECRET_NAME: GIT_PASSWORD
+
+  # ⚠️ 需要修改：CNB OpenAPI 端点
+  # 若下面的调用返回 404，可尝试 https://cnb.cool/api
+  CNB_API_ENDPOINT: https://api.cnb.cool
+
+  # ⚠️ 需要修改：CNB 仓库 slug（org/repo 形式，不带 .git）
+  CNB_REPO_SLUG: 1983shake/sync-repo
 
 jobs:
   sync:
@@ -140,7 +148,7 @@ jobs:
       # 步骤 5：同步 tag 到 CNB
       #   仅在 tag 推送时执行
       #   精确推送指定 ref，避免使用 --tags 误推其他历史 tag
-      #   CNB 收到 tag 后会触发 release-v* 流水线，自动构建 Docker 镜像
+      #   CNB 收到 tag 后会触发 release-v* 流水线，自动创建 Release、构建 Docker 镜像
       # ----------------------------------------------------------------------
       - name: Push tag to CNB
         if: startsWith(github.ref, 'refs/tags/release-v')
@@ -159,10 +167,86 @@ jobs:
           exit 1
 
       # ----------------------------------------------------------------------
+      # 步骤 5.5：从 CNB 拉取该 tag 对应的 Release 描述
+      #   背景：
+      #     CNB 侧 tag_push 流水线的执行顺序是「先建 Release（含用户填写的
+      #     描述），再把 tag 推给 GitHub」。因此此处 GitHub Actions 被触发时，
+      #     CNB Release 一定已存在，可以通过 CNB OpenAPI 反查描述。
+      #
+      #   说明：
+      #     - 使用与 Git 推送相同的 GIT_PASSWORD 作为 Bearer Token
+      #       （CNB Token 通常同时具备 Git 与 OpenAPI 权限）
+      #     - 字段名兼容：CNB 公开 API 可能返回 body / description / desc / notes
+      #     - 若 API 返回非 200 或无匹配 tag，则输出空串，
+      #       后续 Create GitHub Release 会自动回退到 generate_release_notes
+      # ----------------------------------------------------------------------
+      - name: Fetch CNB release description
+        id: cnb_release
+        if: startsWith(github.ref, 'refs/tags/release-v')
+        env:
+          CNB_TOKEN: ${{ secrets[env.CNB_TOKEN_SECRET_NAME] }}
+        run: |
+          set -e
+          TAG_NAME="${GITHUB_REF_NAME}"
+          URL="${CNB_API_ENDPOINT}/${CNB_REPO_SLUG}/-/releases"
+          echo "==> 拉取 CNB Releases: ${URL}"
+
+          CODE="$(curl -s -o /tmp/releases.json -w '%{http_code}' \
+            -H "Authorization: Bearer ${CNB_TOKEN}" \
+            -H "accept: application/json" \
+            "${URL}" 2>/dev/null || echo 000)"
+          echo "==> CNB API HTTP: ${CODE}"
+
+          DESC=""
+          if [ "${CODE}" = "200" ]; then
+            if command -v jq >/dev/null 2>&1; then
+              # 优先 jq（Ubuntu Runner 默认自带）
+              DESC="$(jq -r --arg tag "${TAG_NAME}" '
+                (if type=="array" then . else (.releases // []) end)
+                | map(select((.tag_name // .tag)==$tag))
+                | (.[0] // {})
+                | (.body // .description // .desc // .notes // "")
+              ' /tmp/releases.json 2>/dev/null || true)"
+            else
+              # 兜底：使用 python3
+              DESC="$(python3 - "${TAG_NAME}" <<'PY' 2>/dev/null || true
+          import json, sys
+          tag = sys.argv[1]
+          try:
+              with open("/tmp/releases.json") as f:
+                  data = json.load(f)
+          except Exception:
+              sys.exit(0)
+          items = data if isinstance(data, list) else (data or {}).get("releases", [])
+          for r in items:
+              if r.get("tag_name") == tag or r.get("tag") == tag:
+                  sys.stdout.write(
+                      r.get("body") or r.get("description")
+                      or r.get("desc") or r.get("notes") or ""
+                  )
+                  break
+          PY
+          )"
+            fi
+            echo "==> 描述长度: ${#DESC}"
+          else
+            echo "⚠️ CNB API 返回非 200，跳过描述读取"
+          fi
+
+          # 使用 GITHUB_OUTPUT 多行语法，安全传递包含换行的内容
+          {
+            echo "description<<__CNB_DESC_EOF__"
+            echo "${DESC}"
+            echo "__CNB_DESC_EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+      # ----------------------------------------------------------------------
       # 步骤 6：在 GitHub 端创建 Release
       #   仅在 tag 推送时执行
       #   使用 v3 版本以兼容 Node.js 24（v2 基于已弃用的 Node.js 20）
       #   name 使用 "{项目名}_V{版本号}" 格式，与 CNB 侧 Release 命名一致
+      #   body 优先使用 CNB 侧填写的描述；
+      #   当描述为空时，才用 GitHub 自动生成 notes 兜底
       # ----------------------------------------------------------------------
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/release-v')
@@ -171,4 +255,7 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ steps.version.outputs.PROJECT_NAME }}_V${{ steps.version.outputs.VERSION }}
-          generate_release_notes: true
+          # 从 CNB 拉取到的描述（可能为空字符串）
+          body: ${{ steps.cnb_release.outputs.description }}
+          # 描述为空时回退到自动生成 notes；有描述时禁用自动生成
+          generate_release_notes: ${{ steps.cnb_release.outputs.description == '' }}
