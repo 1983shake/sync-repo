@@ -3,7 +3,7 @@
     - imports:
         - https://cnb.cool/1983shake/secret-repo/-/blob/main/sync-repo-env.yml
       stages:
-        - name: push main to github
+        - name: push main to github (auto-merge)
           script: |
             set -e
             echo "==> 触发事件: push"
@@ -11,37 +11,32 @@
             git remote remove github 2>/dev/null || true
             git remote add github \
               "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPO}.git"
+
             echo "==> 拉取 GitHub 最新更改..."
-            git fetch github main
-            git rebase github/main || {
-              echo "❌ Rebase 失败，可能存在合并冲突，请手动处理。"
-              exit 1
-            }
-            for i in 1 2 3; do
-              echo "==> 尝试推送 (第 ${i} 次)..."
-              if git push github "HEAD:main" --force-with-lease; then
-                echo "✅ 推送成功"
-                break
-              else
-                echo "⚠️ 推送失败，等待 ${i}0 秒后重试..."
-                sleep ${i}0
-                git fetch github main
-                git rebase github/main || {
-                  echo "❌ Rebase 失败，可能存在合并冲突，请手动处理。"
-                  exit 1
-                }
+            git fetch github main || true
+
+            # 内容一致则跳过，避免双向同步互相触发
+            if git rev-parse --verify github/main >/dev/null 2>&1; then
+              if git diff --quiet HEAD github/main; then
+                echo "✅ CNB 与 GitHub 内容一致，无需同步"
+                exit 0
               fi
-              if [ $i -eq 3 ]; then
-                echo "❌ 推送失败，已达最大重试次数。"
-                exit 1
+              echo "==> 合并 GitHub 上的独有改动（冲突时 CNB 优先）..."
+              if ! git merge --no-edit -X ours github/main; then
+                echo "⚠️ 合并异常，放弃合并，直接用 CNB 覆盖 GitHub"
+                git merge --abort 2>/dev/null || true
               fi
-            done
+            fi
+
+            echo "==> 推送至 GitHub..."
+            git push github "HEAD:main" --force
             echo "==> main 同步完成"
+
   commit.add:
     - imports:
         - https://cnb.cool/1983shake/secret-repo/-/blob/main/sync-repo-env.yml
       stages:
-        - name: sync new commits to github
+        - name: sync new commits to github (auto-merge)
           script: |
             set -e
             echo "==> 触发事件: commit.add"
@@ -50,31 +45,24 @@
             git remote remove github 2>/dev/null || true
             git remote add github \
               "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPO}.git"
+
             echo "==> 拉取 GitHub 最新更改..."
-            git fetch github main
-            git rebase github/main || {
-              echo "❌ Rebase 失败，可能存在合并冲突，请手动处理。"
-              exit 1
-            }
-            for i in 1 2 3; do
-              echo "==> 尝试推送 (第 ${i} 次)..."
-              if git push github "HEAD:main" --force-with-lease; then
-                echo "✅ 推送成功"
-                break
-              else
-                echo "⚠️ 推送失败，等待 ${i}0 秒后重试..."
-                sleep ${i}0
-                git fetch github main
-                git rebase github/main || {
-                  echo "❌ Rebase 失败，可能存在合并冲突，请手动处理。"
-                  exit 1
-                }
+            git fetch github main || true
+
+            if git rev-parse --verify github/main >/dev/null 2>&1; then
+              if git diff --quiet HEAD github/main; then
+                echo "✅ CNB 与 GitHub 内容一致，无需同步"
+                exit 0
               fi
-              if [ $i -eq 3 ]; then
-                echo "❌ 推送失败，已达最大重试次数。"
-                exit 1
+              echo "==> 合并 GitHub 上的独有改动（冲突时 CNB 优先）..."
+              if ! git merge --no-edit -X ours github/main; then
+                echo "⚠️ 合并异常，放弃合并，直接用 CNB 覆盖 GitHub"
+                git merge --abort 2>/dev/null || true
               fi
-            done
+            fi
+
+            echo "==> 推送至 GitHub..."
+            git push github "HEAD:main" --force
             echo "==> main 同步完成"
 
 "release-v*":
