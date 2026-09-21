@@ -196,7 +196,7 @@ x-vars:
           type: git:release
           options:
             tag: "${CNB_TAG:-$CNB_BRANCH}"
-            title: "${PROJECT_NAME}_V${VERSION}"
+            name: "${PROJECT_NAME}_V${VERSION}"
             descriptionFromFile: /tmp/release-desc.txt
 
         # -----------------------------------------------------------------
