@@ -32,6 +32,9 @@ env:
   # 格式：cnb.cool/<组织>/<仓库名>.git
   CNB_REPO: cnb.cool/1983shake/sync-repo.git
 
+  # ⚠️ 需要修改：存放 CNB 访问令牌的 GitHub Secret 名称
+  CNB_TOKEN_SECRET_NAME: GIT_PASSWORD
+
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -60,7 +63,7 @@ jobs:
           git config --global user.email "action@github.com"
           git remote remove cnb 2>/dev/null || true
           git remote add cnb \
-            "https://cnb:${{ secrets.GIT_PASSWORD }}@${{ env.CNB_REPO }}"
+            "https://cnb:${{ secrets[env.CNB_TOKEN_SECRET_NAME] }}@${{ env.CNB_REPO }}"
 
       # ----------------------------------------------------------------------
       # 步骤 3：从 tag 中提取版本号和项目名
