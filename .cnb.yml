@@ -185,8 +185,10 @@ x-vars:
             echo "==> 提取到的描述: [${DESC}]"
 
             # 写入共享工作区
-            printf '%s' "${DESC}" > "${CNB_BUILD_WORKSPACE}/release-desc.txt"
-            echo "==> 描述已保存到 ${CNB_BUILD_WORKSPACE}/release-desc.txt"
+            # printf '%s' "${DESC}" > "${CNB_BUILD_WORKSPACE}/release-desc.txt"
+            printf '%s' "${DESC}" > "release-desc.txt"
+            # echo "==> 描述已保存到 ${CNB_BUILD_WORKSPACE}/release-desc.txt"
+            echo "==> 描述已保存到 release-desc.txt"
 
             # ⚠️ 关键：导出后续任务需要的变量
             echo "${NEW_TITLE}" > "${CNB_BUILD_WORKSPACE}/new-title.txt"
@@ -202,7 +204,8 @@ x-vars:
           options:
             tag: "${CNB_TAG:-$CNB_BRANCH}"
             title: "${PROJECT_NAME}_V${VERSION}"
-            descriptionFromFile: "${CNB_BUILD_WORKSPACE}/release-desc.txt"
+            # descriptionFromFile: "${CNB_BUILD_WORKSPACE}/release-desc.txt"
+            descriptionFromFile: "release-desc.txt"
           exports:
             # 从共享工作区读取标题，确保变量在后续任务中可用
             # 注：如果 title 变量在此处不可用，可通过 cnb:read-file 插件读取
