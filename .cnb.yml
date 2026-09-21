@@ -171,8 +171,8 @@ x-vars:
             echo "==> 提取到的描述: [${DESC}]"
 
             # ⚠️ 关键修复：写入 CNB_BUILD_WORKSPACE 共享目录
-            printf '%s' "${DESC}" > "${CNB_BUILD_WORKSPACE}/release-desc.txt"
-            echo "==> 描述已保存到 ${CNB_BUILD_WORKSPACE}/release-desc.txt"
+            printf '%s' "${DESC}" > "${CNB_BUILD_WORKSPACE}release-desc.txt"
+            echo "==> 描述已保存到 ${CNB_BUILD_WORKSPACE}release-desc.txt"
 
             PROJECT_NAME="${GITHUB_REPO##*/}"
             if [ -z "$PROJECT_NAME" ]; then
@@ -190,7 +190,7 @@ x-vars:
           options:
             tag: "${CNB_TAG:-$CNB_BRANCH}"
             name: "${PROJECT_NAME}_V${VERSION}"
-            descriptionFromFile: "${CNB_BUILD_WORKSPACE}/release-desc.txt"
+            descriptionFromFile: "${CNB_BUILD_WORKSPACE}release-desc.txt"
 
         # -----------------------------------------------------------------
         # 步骤 3：同步 tag 到 GitHub
