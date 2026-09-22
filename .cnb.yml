@@ -255,21 +255,27 @@ x-vars:
             fi
 
             # ---------- 转义 JSON 特殊字符 ----------
-            escape_json() {
-              printf '%s' "$1" \
-                | tr '\n' ' ' \
-                | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
-            }
-
-            SAFE_TAG="$(escape_json "${TAG_NAME}")"
-            SAFE_TITLE="$(escape_json "${NEW_TITLE}")"
-            SAFE_DESC="$(escape_json "${DESC}")"
-
-            # ---------- 生成 release-options.json（单行）----------
-            # ⚠️ 关键：git:release 插件的 schema 只识别 description 字段
-            printf '{"tag":"%s","title":"%s","description":"%s"}' \
-              "${SAFE_TAG}" "${SAFE_TITLE}" "${SAFE_DESC}" \
-              > release-options.json
+            # ---------- 生成 release-options.json（单行，合法 JSON）----------
+            if [ "${JSON_TOOL}" = "jq" ]; then
+              jq -n \
+                --arg tag "$TAG_NAME" \
+                --arg title "$NEW_TITLE" \
+                --arg description "$DESC" \
+                '{tag: $tag, title: $title, description: $description}' \
+                > release-options.json
+            elif [ -n "${JSON_TOOL}" ]; then
+              "${JSON_TOOL}" -c '
+            import json, sys
+            json.dump(
+                {"tag": sys.argv[1], "title": sys.argv[2], "description": sys.argv[3]},
+                open("release-options.json", "w"),
+                ensure_ascii=False,
+            )
+            ' "$TAG_NAME" "$NEW_TITLE" "$DESC"
+            else
+              echo "❌ 环境缺少 jq/python，无法生成 JSON"
+              exit 1
+            fi
 
             echo "==> 生成的 release-options.json:"
             cat release-options.json
