@@ -254,7 +254,6 @@ x-vars:
               echo "⚠️ 两个来源均未获取到描述，CNB Release 描述将为空"
             fi
 
-            # ---------- 转义 JSON 特殊字符 ----------
             # ---------- 生成 release-options.json（单行，合法 JSON）----------
             if [ "${JSON_TOOL}" = "jq" ]; then
               jq -n \
