@@ -39,7 +39,7 @@ x-vars:
               "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPO}.git"
 
             for i in 1 2 3 4 5; do
-              echo "------ 第 ${i} 次尝试 ------"
+              echo "------ 第 ${i} 次尝试 ------" 
               git fetch github main || true
 
               if git rev-parse --verify github/main >/dev/null 2>&1; then
@@ -83,7 +83,7 @@ x-vars:
               "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPO}.git"
 
             for i in 1 2 3 4 5; do
-              echo "------ 第 ${i} 次尝试 ------"
+              echo "------ 第 ${i} 次尝试 ------" 
               git fetch github main || true
 
               if git rev-parse --verify github/main >/dev/null 2>&1; then
@@ -292,7 +292,7 @@ x-vars:
         #   （若由 GitHub 触发，这一步通常是 no-op，因为 tag 已存在）
         # -----------------------------------------------------------------
         - name: sync tag to github
-          script: |
+          script: |-
             set -e
             TAG_NAME="${CNB_TAG:-$CNB_BRANCH}"
 
@@ -300,6 +300,18 @@ x-vars:
             git remote remove github 2>/dev/null || true
             git remote add github \
               "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPO}.git"
+
+            # ---- 新增：探测 GitHub 是否已有相同 tag 且 commit 一致，避免死循环 ----
+            REMOTE_TAG_INFO=$(git ls-remote github "refs/tags/${TAG_NAME}" 2>/dev/null || true)
+            if [ -n "${REMOTE_TAG_INFO}" ]; then
+              LOCAL_COMMIT=$(git rev-parse "${TAG_NAME}" 2>/dev/null || true)
+              REMOTE_COMMIT=$(echo "${REMOTE_TAG_INFO}" | awk '{print $1}')
+              if [ -n "${LOCAL_COMMIT}" ] && [ "${LOCAL_COMMIT}" = "${REMOTE_COMMIT}" ]; then
+                echo "✅ GitHub 已存在相同的 tag (${LOCAL_COMMIT})，跳过同步"
+                exit 0
+              fi
+            fi
+            # --------------------------------------------------------------------
 
             for i in 1 2 3 4 5; do
               if git push github \

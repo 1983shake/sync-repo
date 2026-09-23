@@ -220,6 +220,19 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/release-v')
         run: |
           echo "==> 同步 tag ${GITHUB_REF_NAME} 到 CNB"
+
+          # ---- 新增：探测 CNB 是否已有相同 tag 且 commit 一致，避免死循环 ----
+          REMOTE_TAG_INFO=$(git ls-remote cnb "refs/tags/${GITHUB_REF_NAME}" 2>/dev/null || true)
+          if [ -n "${REMOTE_TAG_INFO}" ]; then
+            LOCAL_COMMIT=$(git rev-parse "${GITHUB_REF_NAME}" 2>/dev/null || true)
+            REMOTE_COMMIT=$(echo "${REMOTE_TAG_INFO}" | awk '{print $1}')
+            if [ -n "${LOCAL_COMMIT}" ] && [ "${LOCAL_COMMIT}" = "${REMOTE_COMMIT}" ]; then
+              echo "✅ CNB 已存在相同的 tag (${LOCAL_COMMIT})，跳过同步"
+              exit 0
+            fi
+          fi
+          # ------------------------------------------------------------------
+
           for i in 1 2 3 4 5; do
             if git push cnb \
               "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}" --force; then
