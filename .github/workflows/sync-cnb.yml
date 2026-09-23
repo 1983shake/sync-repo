@@ -1,14 +1,5 @@
 # ============================================================================
 # GitHub Actions：同步 GitHub -> CNB
-#   功能：
-#     1. 推送 main 分支 -> 合并 CNB 独有改动后推送 main（GitHub 优先）
-#     2. 推送 release-v* tag ->
-#          a) 先从 CNB 拉取该 tag 的 Release 描述（若存在）
-#          b) 在 GitHub 创建 Release
-#          c) 再把 tag 推送到 CNB
-#          d) CNB 侧收到 tag 后，会通过 GitHub API 反查描述并创建 CNB Release
-#   依赖：
-#     - Repository Secret: GIT_PASSWORD（CNB 访问令牌，具备仓库写权限）
 # ============================================================================
 name: Sync to CNB and Create Release
 
@@ -108,8 +99,7 @@ jobs:
           BODY=""
           for i in 1 2 3 4 5; do
             CODE="$(curl -sS -o /tmp/cnb-releases.json -w '%{http_code}' \
-              -H "Authorization: Bearer ${CNB_TOKEN}" \
-              -H "accept: application/json" \
+              -H "Authorization: Bearer ${CNB_TOKEN}" -H "accept: application/json" \
               "${URL}" || echo 000)"
             echo "==> 第 ${i} 次 CNB API HTTP: ${CODE}"
 
@@ -145,51 +135,21 @@ jobs:
           overwrite_files: true
 
       # ----------------------------------------------------------------------
-      # 步骤 7：同步 tag 到 CNB（包含防死循环优化逻辑）
+      # 步骤 7：同步 tag 到 CNB
+      #   ⚠️ 优化：只要 CNB 存在该 tag，直接跳过，不再比对 commit
       # ----------------------------------------------------------------------
       - name: Push tag to CNB
         if: startsWith(github.ref, 'refs/tags/release-v')
         run: |
           echo "==> 同步 tag ${GITHUB_REF_NAME} 到 CNB"
 
-          # ---- 优化的防死循环函数：检查远端是否已有相同 Commit 的 Tag ----
-          check_remote_tag_matches() {
-            local remote_name="$1"
-            local tag_name="$2"
-            local local_commit
-            local remote_commit
-            local remote_info
-
-            local_commit="$(git rev-parse "${tag_name}" 2>/dev/null || true)"
-            if [ -z "${local_commit}" ]; then
-              echo "❌ 本地无法解析 tag ${tag_name}" >&2
-              return 1
-            fi
-
-            # 最多重试 3 次，每次等待 10 秒
-            for i in 1 2 3; do
-              remote_info="$(git ls-remote "${remote_name}" "refs/tags/${tag_name}" 2>/dev/null || true)"
-              if [ -n "${remote_info}" ]; then
-                remote_commit="$(echo "${remote_info}" | awk '{print $1}')"
-                if [ "${local_commit}" = "${remote_commit}" ]; then
-                  return 0
-                else
-                  echo "⚠️ 第 ${i} 次检查: 远端 (${remote_commit}) 与本地 (${local_commit}) 不一致，10 秒后重试..."
-                fi
-              else
-                echo "⚠️ 第 ${i} 次检查: 远端尚未找到该 tag，10 秒后重试..."
-              fi
-              sleep 10
-            done
-
-            return 1
-          }
-          # -----------------------------------------------------------------
-
-          if check_remote_tag_matches "cnb" "${GITHUB_REF_NAME}"; then
-            echo "✅ CNB 已存在相同的 tag，跳过同步（防死循环生效）"
+          # ---- 优化后的防死循环逻辑：存在即跳过 ----
+          REMOTE_TAG_INFO=$(git ls-remote cnb "refs/tags/${GITHUB_REF_NAME}" 2>/dev/null || true)
+          if [ -n "${REMOTE_TAG_INFO}" ]; then
+            echo "✅ CNB 已存在同名 tag，跳过同步（防死循环生效，不再比对 commit）"
             exit 0
           fi
+          # ----------------------------------------
 
           echo "==> 开始推送 tag 到 CNB..."
           for i in 1 2 3 4 5; do

@@ -10,14 +10,6 @@ x-vars:
 
 # ============================================================================
 # CNB 流水线配置
-#   功能：
-#     1. main 分支 push / commit.add -> 合并 GitHub 改动后推送 main（CNB 优先）
-#     2. release-v* tag ->
-#          描述来源优先级：
-#            a) CNB 侧已存在的 Release 描述（用户在 CNB 网页上填写）
-#            b) GitHub 侧该 tag 的 Release 描述（用户在 GitHub 网页上填写）
-#          使用该描述创建/更新 CNB Release，标题规范化为 "<项目名>_V<版本号>"
-#          + 同步 tag 到 GitHub + 构建 Docker 镜像
 # ============================================================================
 
 # ============================================================================
@@ -113,13 +105,6 @@ x-vars:
 
 # ============================================================================
 # release-v* 标签流水线
-#   描述获取优先级：
-#     1. CNB 侧该 tag 已存在的 Release（用户在 CNB 网页上填写）
-#     2. GitHub 侧该 tag 的 Release（用户在 GitHub 网页上填写）
-#   用途：
-#     - 用该描述创建/更新 CNB Release（标题规范化为 "<项目名>_V<版本号>"）
-#     - 同步 tag 到 GitHub
-#     - 构建并推送 Docker 镜像
 # ============================================================================
 "release-v*":
   tag_push:
@@ -145,22 +130,17 @@ x-vars:
             echo "==> 版本号:   ${VERSION}"
             echo "==> 目标标题: ${NEW_TITLE}"
 
-            # ---------- JSON 工具探测 ----------
             JSON_TOOL=""
             if   command -v jq      >/dev/null 2>&1; then JSON_TOOL=jq
             elif command -v python3 >/dev/null 2>&1; then JSON_TOOL=python3
             elif command -v python  >/dev/null 2>&1; then JSON_TOOL=python
             fi
-            echo "==> JSON 工具: ${JSON_TOOL:-无}"
 
-            # ---------- 统一的 JSON 描述提取函数（jq / python 双实现）----------
             extract_desc_from_file() {
               local file="$1"
               local tag="$2"
-              local fields="$3"
-
               if [ "${JSON_TOOL}" = "jq" ]; then
-                jq -r --arg tag "${tag}" --arg fields "${fields}" '
+                jq -r --arg tag "${tag}" '
                   (if type=="array" then . else (.releases // []) end)
                   | map(select((.tag_name // .tag)==$tag))
                   | (.[0] // {})
@@ -178,10 +158,7 @@ x-vars:
             items = data if isinstance(data, list) else (data or {}).get("releases", [])
             for r in items:
                 if r.get("tag_name") == tag or r.get("tag") == tag:
-                    sys.stdout.write(
-                        r.get("body") or r.get("description")
-                        or r.get("desc") or r.get("notes") or ""
-                    )
+                    sys.stdout.write(r.get("body") or r.get("description") or r.get("desc") or r.get("notes") or "")
                     break
                 ' "${file}" "${tag}" 2>/dev/null || true
               fi
@@ -206,61 +183,33 @@ x-vars:
 
             DESC=""
 
-            # 来源 1：CNB 侧该 tag 的 Release 描述
             if [ -n "${JSON_TOOL}" ] && [ -n "${CNB_API_ENDPOINT}" ] && [ -n "${CNB_REPO_SLUG}" ]; then
               URL="${CNB_API_ENDPOINT}/${CNB_REPO_SLUG}/-/releases"
-              echo "==> [来源 1] 拉取 CNB Releases: ${URL}"
-
               CODE="$(curl -s -o /tmp/cnb-releases.json -w '%{http_code}' \
-                -H "Authorization: Bearer ${CNB_TOKEN}" \
-                -H "accept: application/json" \
+                -H "Authorization: Bearer ${CNB_TOKEN}" -H "accept: application/json" \
                 "${URL}" 2>/dev/null || echo 000)"
-              echo "==> CNB API HTTP: ${CODE}"
-
               if [ "${CODE}" = "200" ]; then
-                DESC="$(extract_desc_from_file /tmp/cnb-releases.json "${TAG_NAME}" "body description desc notes")"
-                echo "==> CNB 提取到的描述长度: ${#DESC}"
+                DESC="$(extract_desc_from_file /tmp/cnb-releases.json "${TAG_NAME}")"
               fi
             fi
 
-            # 来源 2：GitHub 侧该 tag 的 Release 描述
             if [ -z "${DESC}" ] && [ -n "${JSON_TOOL}" ] && [ -n "${GITHUB_TOKEN}" ] && [ -n "${GITHUB_REPO}" ]; then
               GH_URL="https://api.github.com/repos/${GITHUB_REPO}/releases/tags/${TAG_NAME}"
-              echo "==> [来源 2] 拉取 GitHub Release: ${GH_URL}"
-
               CODE="$(curl -s -o /tmp/gh-release.json -w '%{http_code}' \
-                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-                -H "accept: application/vnd.github+json" \
-                -H "X-GitHub-Api-Version: 2022-11-28" \
-                "${GH_URL}" 2>/dev/null || echo 000)"
-              echo "==> GitHub API HTTP: ${CODE}"
-
+                -H "Authorization: Bearer ${GITHUB_TOKEN}" -H "accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2022-11-28" "${GH_URL}" 2>/dev/null || echo 000)"
               if [ "${CODE}" = "200" ]; then
                 DESC="$(extract_body_from_gh /tmp/gh-release.json)"
-                echo "==> GitHub 提取到的描述长度: ${#DESC}"
               fi
             fi
 
-            if [ -z "${DESC}" ]; then
-              echo "⚠️ 两个来源均未获取到描述，CNB Release 描述将为空"
-            fi
-
-            # ---------- 生成 release-options.json ----------
             if [ "${JSON_TOOL}" = "jq" ]; then
-              jq -n \
-                --arg tag "$TAG_NAME" \
-                --arg title "$NEW_TITLE" \
-                --arg description "$DESC" \
-                '{tag: $tag, title: $title, description: $description}' \
-                > release-options.json
+              jq -n --arg tag "$TAG_NAME" --arg title "$NEW_TITLE" --arg description "$DESC" \
+                '{tag: $tag, title: $title, description: $description}' > release-options.json
             elif [ -n "${JSON_TOOL}" ]; then
               "${JSON_TOOL}" -c '
             import json, sys
-            json.dump(
-                {"tag": sys.argv[1], "title": sys.argv[2], "description": sys.argv[3]},
-                open("release-options.json", "w"),
-                ensure_ascii=False,
-            )
+            json.dump({"tag": sys.argv[1], "title": sys.argv[2], "description": sys.argv[3]}, open("release-options.json", "w"), ensure_ascii=False)
             ' "$TAG_NAME" "$NEW_TITLE" "$DESC"
             else
               echo "❌ 环境缺少 jq/python，无法生成 JSON"
@@ -279,7 +228,8 @@ x-vars:
           optionsFrom: ./release-options.json
 
         # -----------------------------------------------------------------
-        # 步骤 3：同步 tag 到 GitHub（包含防死循环优化逻辑）
+        # 步骤 3：同步 tag 到 GitHub
+        #   ⚠️ 优化：只要 GitHub 存在该 tag，直接跳过，不再比对 commit
         # -----------------------------------------------------------------
         - name: sync tag to github
           script: |-
@@ -291,44 +241,13 @@ x-vars:
             git remote add github \
               "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPO}.git"
 
-            # ---- 优化的防死循环函数：检查远端是否已有相同 Commit 的 Tag ----
-            check_remote_tag_matches() {
-              local remote_name="$1"
-              local tag_name="$2"
-              local local_commit
-              local remote_commit
-              local remote_info
-
-              local_commit="$(git rev-parse "${tag_name}" 2>/dev/null || true)"
-              if [ -z "${local_commit}" ]; then
-                echo "❌ 本地无法解析 tag ${tag_name}" >&2
-                return 1
-              fi
-
-              # 最多重试 3 次，每次等待 10 秒
-              for i in 1 2 3; do
-                remote_info="$(git ls-remote "${remote_name}" "refs/tags/${tag_name}" 2>/dev/null || true)"
-                if [ -n "${remote_info}" ]; then
-                  remote_commit="$(echo "${remote_info}" | awk '{print $1}')"
-                  if [ "${local_commit}" = "${remote_commit}" ]; then
-                    return 0 # 一致，返回成功
-                  else
-                    echo "⚠️ 第 ${i} 次检查: 远端 (${remote_commit}) 与本地 (${local_commit}) 不一致，10 秒后重试..."
-                  fi
-                else
-                  echo "⚠️ 第 ${i} 次检查: 远端尚未找到该 tag，10 秒后重试..."
-                fi
-                sleep 10
-              done
-
-              return 1 # 3次重试后依然不一致或不存在
-            }
-            # -----------------------------------------------------------------
-
-            if check_remote_tag_matches "github" "${TAG_NAME}"; then
-              echo "✅ GitHub 已存在相同的 tag，跳过同步（防死循环生效）"
+            # ---- 优化后的防死循环逻辑：存在即跳过 ----
+            REMOTE_TAG_INFO=$(git ls-remote github "refs/tags/${TAG_NAME}" 2>/dev/null || true)
+            if [ -n "${REMOTE_TAG_INFO}" ]; then
+              echo "✅ GitHub 已存在同名 tag，跳过同步（防死循环生效，不再比对 commit）"
               exit 0
             fi
+            # ----------------------------------------
 
             echo "==> 开始推送 tag 到 GitHub..."
             for i in 1 2 3 4 5; do
@@ -354,10 +273,7 @@ x-vars:
             VERSION="${TAG_NAME#release-v}"
             echo "==> 构建版本: ${VERSION}"
 
-            docker build \
-              -t "${IMAGE_BASE}:${VERSION}" \
-              -t "${IMAGE_BASE}:latest" \
-              .
+            docker build -t "${IMAGE_BASE}:${VERSION}" -t "${IMAGE_BASE}:latest" .
             docker push "${IMAGE_BASE}:${VERSION}"
             docker push "${IMAGE_BASE}:latest"
             echo "==> 镜像推送完成: ${IMAGE_BASE}:${VERSION}"
