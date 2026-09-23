@@ -155,9 +155,6 @@ x-vars:
 
             # ---------- 统一的 JSON 描述提取函数（jq / python 双实现）----------
             extract_desc_from_file() {
-              # 参数1: JSON 文件路径
-              # 参数2: 目标 tag
-              # 参数3: 字段优先级（从高到低，空格分隔），如 "body description desc notes"
               local file="$1"
               local tag="$2"
               local fields="$3"
@@ -190,7 +187,6 @@ x-vars:
               fi
             }
 
-            # ---------- 提取单个 GitHub Release JSON 的描述（顶层 body）----------
             extract_body_from_gh() {
               local file="$1"
               if [ "${JSON_TOOL}" = "jq" ]; then
@@ -210,9 +206,7 @@ x-vars:
 
             DESC=""
 
-            # -----------------------------------------------------------------
-            # 来源 1：CNB 侧该 tag 的 Release 描述（若用户在 CNB 网页上填了）
-            # -----------------------------------------------------------------
+            # 来源 1：CNB 侧该 tag 的 Release 描述
             if [ -n "${JSON_TOOL}" ] && [ -n "${CNB_API_ENDPOINT}" ] && [ -n "${CNB_REPO_SLUG}" ]; then
               URL="${CNB_API_ENDPOINT}/${CNB_REPO_SLUG}/-/releases"
               echo "==> [来源 1] 拉取 CNB Releases: ${URL}"
@@ -229,10 +223,7 @@ x-vars:
               fi
             fi
 
-            # -----------------------------------------------------------------
-            # 来源 2：GitHub 侧该 tag 的 Release 描述（GitHub 触发场景）
-            #   只有在来源 1 为空时才去 GitHub 拿，避免覆盖 CNB 上手动填的描述
-            # -----------------------------------------------------------------
+            # 来源 2：GitHub 侧该 tag 的 Release 描述
             if [ -z "${DESC}" ] && [ -n "${JSON_TOOL}" ] && [ -n "${GITHUB_TOKEN}" ] && [ -n "${GITHUB_REPO}" ]; then
               GH_URL="https://api.github.com/repos/${GITHUB_REPO}/releases/tags/${TAG_NAME}"
               echo "==> [来源 2] 拉取 GitHub Release: ${GH_URL}"
@@ -254,7 +245,7 @@ x-vars:
               echo "⚠️ 两个来源均未获取到描述，CNB Release 描述将为空"
             fi
 
-            # ---------- 生成 release-options.json（单行，合法 JSON）----------
+            # ---------- 生成 release-options.json ----------
             if [ "${JSON_TOOL}" = "jq" ]; then
               jq -n \
                 --arg tag "$TAG_NAME" \
@@ -281,15 +272,14 @@ x-vars:
             echo
 
         # -----------------------------------------------------------------
-        # 步骤 2：用 optionsFrom 读取 JSON，创建/规范化 CNB Release
+        # 步骤 2：创建/规范化 CNB Release
         # -----------------------------------------------------------------
         - name: create / normalize cnb release
           type: git:release
           optionsFrom: ./release-options.json
 
         # -----------------------------------------------------------------
-        # 步骤 3：同步 tag 到 GitHub
-        #   （若由 GitHub 触发，这一步通常是 no-op，因为 tag 已存在）
+        # 步骤 3：同步 tag 到 GitHub（包含防死循环优化逻辑）
         # -----------------------------------------------------------------
         - name: sync tag to github
           script: |-
@@ -301,28 +291,46 @@ x-vars:
             git remote add github \
               "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPO}.git"
 
-            # ---- 新增：探测 GitHub 是否已有相同 tag 且 commit 一致，避免死循环 ----
-            SKIP_PUSH=false
-            for i in 1 2 3 4 5; do
-              REMOTE_TAG_INFO=$(git ls-remote github "refs/tags/${TAG_NAME}" 2>/dev/null || true)
-              if [ -n "${REMOTE_TAG_INFO}" ]; then
-                LOCAL_COMMIT=$(git rev-parse "${TAG_NAME}" 2>/dev/null || true)
-                REMOTE_COMMIT=$(echo "${REMOTE_TAG_INFO}" | awk '{print $1}')
-                if [ -n "${LOCAL_COMMIT}" ] && [ "${LOCAL_COMMIT}" = "${REMOTE_COMMIT}" ]; then
-                  echo "✅ GitHub 已存在相同的 tag (${LOCAL_COMMIT})，跳过同步"
-                  SKIP_PUSH=true
-                  break
-                fi
-              fi
-              echo "⚠️ GitHub 上的 tag 尚未更新或未找到，${i} 秒后重试..."
-              sleep "$i"
-            done
+            # ---- 优化的防死循环函数：检查远端是否已有相同 Commit 的 Tag ----
+            check_remote_tag_matches() {
+              local remote_name="$1"
+              local tag_name="$2"
+              local local_commit
+              local remote_commit
+              local remote_info
 
-            if [ "${SKIP_PUSH}" = "true" ]; then
+              local_commit="$(git rev-parse "${tag_name}" 2>/dev/null || true)"
+              if [ -z "${local_commit}" ]; then
+                echo "❌ 本地无法解析 tag ${tag_name}" >&2
+                return 1
+              fi
+
+              # 最多重试 3 次，每次等待 10 秒
+              for i in 1 2 3; do
+                remote_info="$(git ls-remote "${remote_name}" "refs/tags/${tag_name}" 2>/dev/null || true)"
+                if [ -n "${remote_info}" ]; then
+                  remote_commit="$(echo "${remote_info}" | awk '{print $1}')"
+                  if [ "${local_commit}" = "${remote_commit}" ]; then
+                    return 0 # 一致，返回成功
+                  else
+                    echo "⚠️ 第 ${i} 次检查: 远端 (${remote_commit}) 与本地 (${local_commit}) 不一致，10 秒后重试..."
+                  fi
+                else
+                  echo "⚠️ 第 ${i} 次检查: 远端尚未找到该 tag，10 秒后重试..."
+                fi
+                sleep 10
+              done
+
+              return 1 # 3次重试后依然不一致或不存在
+            }
+            # -----------------------------------------------------------------
+
+            if check_remote_tag_matches "github" "${TAG_NAME}"; then
+              echo "✅ GitHub 已存在相同的 tag，跳过同步（防死循环生效）"
               exit 0
             fi
-            # --------------------------------------------------------------------
 
+            echo "==> 开始推送 tag 到 GitHub..."
             for i in 1 2 3 4 5; do
               if git push github \
                 "refs/tags/${TAG_NAME}:refs/tags/${TAG_NAME}" --force; then
@@ -346,8 +354,6 @@ x-vars:
             VERSION="${TAG_NAME#release-v}"
             echo "==> 构建版本: ${VERSION}"
 
-            # ⚠️ 可选：把版本号注入镜像时取消注释，并在 Dockerfile 声明 ARG APP_VERSION
-            # docker build --build-arg APP_VERSION="${VERSION}" \
             docker build \
               -t "${IMAGE_BASE}:${VERSION}" \
               -t "${IMAGE_BASE}:latest" \
