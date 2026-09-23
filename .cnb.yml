@@ -302,14 +302,24 @@ x-vars:
               "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPO}.git"
 
             # ---- 新增：探测 GitHub 是否已有相同 tag 且 commit 一致，避免死循环 ----
-            REMOTE_TAG_INFO=$(git ls-remote github "refs/tags/${TAG_NAME}" 2>/dev/null || true)
-            if [ -n "${REMOTE_TAG_INFO}" ]; then
-              LOCAL_COMMIT=$(git rev-parse "${TAG_NAME}" 2>/dev/null || true)
-              REMOTE_COMMIT=$(echo "${REMOTE_TAG_INFO}" | awk '{print $1}')
-              if [ -n "${LOCAL_COMMIT}" ] && [ "${LOCAL_COMMIT}" = "${REMOTE_COMMIT}" ]; then
-                echo "✅ GitHub 已存在相同的 tag (${LOCAL_COMMIT})，跳过同步"
-                exit 0
+            SKIP_PUSH=false
+            for i in 1 2 3 4 5; do
+              REMOTE_TAG_INFO=$(git ls-remote github "refs/tags/${TAG_NAME}" 2>/dev/null || true)
+              if [ -n "${REMOTE_TAG_INFO}" ]; then
+                LOCAL_COMMIT=$(git rev-parse "${TAG_NAME}" 2>/dev/null || true)
+                REMOTE_COMMIT=$(echo "${REMOTE_TAG_INFO}" | awk '{print $1}')
+                if [ -n "${LOCAL_COMMIT}" ] && [ "${LOCAL_COMMIT}" = "${REMOTE_COMMIT}" ]; then
+                  echo "✅ GitHub 已存在相同的 tag (${LOCAL_COMMIT})，跳过同步"
+                  SKIP_PUSH=true
+                  break
+                fi
               fi
+              echo "⚠️ GitHub 上的 tag 尚未更新或未找到，${i} 秒后重试..."
+              sleep "$i"
+            done
+
+            if [ "${SKIP_PUSH}" = "true" ]; then
+              exit 0
             fi
             # --------------------------------------------------------------------
 
